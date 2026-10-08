@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html dir="ltr">
+<head>
+<meta charset="utf-8">
+<style>
+  body { width:300px; font-family:Segoe UI,sans-serif; font-size:13px;
+         margin:0; padding:12px; background:#1e1e2e; color:#cdd6f4; }
+  h2   { margin:0 0 10px; font-size:15px; color:#89b4fa; }
+  .row { display:flex; align-items:center; margin-bottom:8px; gap:8px; }
+  label { flex:1; }
+  input[type=checkbox] { accent-color:#89b4fa; }
+  .status { padding:6px 10px; border-radius:6px; margin-bottom:10px;
+            font-size:12px; background:#313244; }
+  .status.ok  { border-left:3px solid #a6e3a1; }
+  .status.err { border-left:3px solid #f38ba8; }
+  button { background:#89b4fa; color:#1e1e2e; border:none; border-radius:6px;
+           padding:6px 14px; cursor:pointer; font-size:12px; font-weight:600; }
+  button:hover { background:#74c7ec; }
+  .sep { border:none; border-top:1px solid #313244; margin:10px 0; }
+  .mini { font-size:11px; color:#6c7086; }
+</style>
+</head>
+<body>
+<h2>🟢 Lass Download Manager</h2>
+<div id="status" class="status">Checking connection...</div>
+
+<div class="row">
+  <label>Enable Lass for downloads</label>
+  <input type="checkbox" id="chk_enabled" checked>
+</div>
+<div class="row">
+  <label>Capture videos</label>
+  <input type="checkbox" id="chk_video" checked>
+</div>
+<div class="row">
+  <label>Capture audio</label>
+  <input type="checkbox" id="chk_audio" checked>
+</div>
+<hr class="sep">
+<div class="row mini">
+  Min file size: <input type="number" id="min_size" style="width:60px;background:#313244;
+  color:#cdd6f4;border:1px solid #45475a;border-radius:4px;padding:2px 4px"> MB
+</div>
+<hr class="sep">
+<div class="row" style="justify-content:flex-end">
+  <button id="btn_save">Save</button>
+</div>
+<div class="mini" style="text-align:center">v5.0 — Lass Download Manager</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,87 @@
+#include <windows.h>
+#include "src/version.h"
+
+/* ── آیکون اصلی ── */
+#define IDI_MAIN_ICON 1
+IDI_MAIN_ICON ICON "Lass.ico"
+
+/* ── آیکون‌های toolbar (طراحی شیشه‌ای الهام‌گرفته از Vista Aero) ──
+   شماره‌ها باید دقیقاً با core/guo.c یکی باشن (همون قرارداد
+   IDI_MAIN_ICON که از قبل بود). */
+#define IDI_TB_ADD          4001
+#define IDI_TB_PAUSE        4002
+#define IDI_TB_RESUME       4003
+#define IDI_TB_CANCEL       4004
+#define IDI_TB_REMOVE       4005
+#define IDI_TB_OPEN_FOLDER  4006
+#define IDI_TB_SPEED_GRAPH  4007
+#define IDI_TB_BASKET       4008
+#define IDI_TB_CLIP_MONITOR 4009
+#define IDI_TB_CLEAR_DONE   4010
+
+IDI_TB_ADD          ICON "icons/add.ico"
+IDI_TB_PAUSE        ICON "icons/pause.ico"
+IDI_TB_RESUME       ICON "icons/resume.ico"
+IDI_TB_CANCEL       ICON "icons/cancel.ico"
+IDI_TB_REMOVE       ICON "icons/remove.ico"
+IDI_TB_OPEN_FOLDER  ICON "icons/open_folder.ico"
+IDI_TB_SPEED_GRAPH  ICON "icons/speed_graph.ico"
+IDI_TB_BASKET       ICON "icons/basket.ico"
+IDI_TB_CLIP_MONITOR ICON "icons/clip_monitor.ico"
+IDI_TB_CLEAR_DONE   ICON "icons/clear_done.ico"
+
+/* ── Version Info ──
+   همه‌ی مقادیر از src/version.h میان — تنها منبع نسخه در کل
+   پروژه. */
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    LASS_VERSION_RC
+ PRODUCTVERSION LASS_VERSION_RC
+ FILEFLAGSMASK  0x3fL
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "Lass Project"
+            VALUE "FileDescription",  "Lass Download Manager"
+            VALUE "FileVersion",      LASS_VERSION_STRING
+            VALUE "InternalName",     "Lass"
+            VALUE "LegalCopyright",   "Copyright 2026"
+            VALUE "OriginalFilename", "Lass.exe"
+            VALUE "ProductName",      "Lass Download Manager"
+            VALUE "ProductVersion",   LASS_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
+/* ── Manifest: DPI aware + ComCtl v6 ── */
+1 RT_MANIFEST
+BEGIN
+"<?xml version=""1.0"" encoding=""UTF-8"" standalone=""yes""?>"
+"<assembly xmlns=""urn:schemas-microsoft-com:asm.v1"" manifestVersion=""1.0"">"
+"<assemblyIdentity version=""1.0.0.0"" processorArchitecture=""*"""
+" name=""Lass.DownloadManager"" type=""win32""/>"
+"<description>Lass Download Manager</description>"
+"<dependency><dependentAssembly>"
+"<assemblyIdentity type=""win32"" name=""Microsoft.Windows.Common-Controls"""
+" version=""6.0.0.0"" processorArchitecture=""*"""
+" publicKeyToken=""6595b64144ccf1df"" language=""*""/>"
+"</dependentAssembly></dependency>"
+"<trustInfo xmlns=""urn:schemas-microsoft-com:asm.v3"">"
+"<security><requestedPrivileges>"
+"<requestedExecutionLevel level=""asInvoker"" uiAccess=""false""/>"
+"</requestedPrivileges></security></trustInfo>"
+"<application xmlns=""urn:schemas-microsoft-com:asm.v3"">"
+"<windowsSettings>"
+"<dpiAware xmlns=""http://schemas.microsoft.com/SMI/2005/WindowsSettings"">true</dpiAware>"
+"</windowsSettings></application>"
+"</assembly>"
+END

@@ -1,0 +1,45 @@
+{
+  "manifest_version": 2,
+  "name": "Lass Download Manager",
+  "version": "5.0",
+  "description": "Capture downloads and send them to Lass Download Manager v5",
+
+  "permissions": [
+    "nativeMessaging",
+    "downloads",
+    "webRequest",
+    "webRequestBlocking",
+    "contextMenus",
+    "notifications",
+    "storage",
+    "<all_urls>"
+  ],
+
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": true
+  },
+
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_title": "Lass Download Manager",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "lass@downloadmanager.local",
+      "strict_min_version": "149.0"
+    }
+  }
+}

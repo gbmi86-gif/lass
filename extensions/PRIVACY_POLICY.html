@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Lass Download Manager ��� Privacy Policy</title>
+  <style>
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="" />
+
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:780px;margin:40px auto;padding:0 20px;line-height:1.6;color:#1a1a1a;}
+h1{border-bottom:2px solid #2ecc71;padding-bottom:10px;}
+table{border-collapse:collapse;width:100%;margin:16px 0;}
+th,td{border:1px solid #ddd;padding:8px 12px;text-align:left;vertical-align:top;}
+th{background:#f4f4f4;}
+code{background:#f4f4f4;padding:2px 5px;border-radius:3px;}
+</style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Lass Download Manager ��� Privacy Policy</h1>
+</header>
+<h1 id="privacy-policy-lass-download-manager-browser-extension">Privacy
+Policy — Lass Download Manager (Browser Extension)</h1>
+<p><strong>Last updated:</strong> September 2026</p>
+<p>This policy covers the Lass Download Manager browser extension for
+Google Chrome and Mozilla Firefox (the “Extension”). It does not cover
+the Lass Download Manager desktop application beyond what is described
+below.</p>
+<h2 id="summary">Summary</h2>
+<p>The Extension does not collect, store, transmit, or sell any personal
+data to the developer, to Google, to Mozilla, or to any third party. It
+has no analytics, no telemetry, and no remote server of any kind. Its
+only job is to notice download links on pages you visit and hand them
+off — entirely on your own computer — to the Lass Download Manager
+desktop application, if and when it is running.</p>
+<h2 id="what-the-extension-does">What the Extension does</h2>
+<p>When you click a download link, or choose “Download with Lass” from
+the right-click menu, the Extension sends the URL (and, where available,
+the suggested filename and the referring page) to the Lass Download
+Manager desktop application installed on the same computer. This is done
+entirely through your operating system’s local interprocess
+communication (a named pipe on Windows) — the data never leaves your
+computer, and no server operated by the developer, Google, or Mozilla is
+involved at any point.</p>
+<p>If the Lass Download Manager desktop application is not running, the
+Extension does nothing with the link beyond letting the browser’s normal
+download behavior proceed; no data is queued, cached, or sent
+anywhere.</p>
+<h2 id="permissions-and-why-the-extension-requests-them">Permissions and
+why the Extension requests them</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Permission</th>
+<th>Why it’s needed</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>nativeMessaging</code></td>
+<td>To talk to the locally-installed Lass Download Manager desktop
+application. This is the only channel the Extension uses to send any
+information anywhere, and it never leaves your computer.</td>
+</tr>
+<tr class="even">
+<td><code>downloads</code></td>
+<td>To detect when a browser download starts, so it can be handed to
+Lass Download Manager instead (or alongside) the browser’s own download
+manager.</td>
+</tr>
+<tr class="odd">
+<td><code>webRequest</code> / <code>webRequestBlocking</code>
+(Firefox)</td>
+<td>To recognize downloadable links (e.g. direct file links) that the
+<code>downloads</code> API alone would not catch.</td>
+</tr>
+<tr class="even">
+<td><code>&lt;all_urls&gt;</code> (host permission)</td>
+<td>Download links can appear on any website, so the Extension needs to
+be able to recognize them regardless of which site you’re on. This
+permission is used only to detect links; the Extension does not read,
+log, or transmit page content.</td>
+</tr>
+<tr class="odd">
+<td><code>contextMenus</code></td>
+<td>To add the “Download with Lass” option to the browser’s right-click
+menu.</td>
+</tr>
+<tr class="even">
+<td><code>notifications</code></td>
+<td>To show a local notification when a download has been handed off
+(e.g. success or “Lass is not running”). These notifications are
+generated and shown entirely on your device.</td>
+</tr>
+<tr class="odd">
+<td><code>storage</code></td>
+<td>To remember the Extension’s own settings (e.g. whether it’s enabled)
+locally in your browser. This data stays in your browser’s local storage
+and is never transmitted anywhere.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="data-retention">Data retention</h2>
+<p>Because the Extension does not collect or transmit any personal data,
+there is nothing for the developer to retain, and nothing to delete on
+request — there is simply no data leaving your device to begin with. Any
+local settings the Extension stores (via the <code>storage</code>
+permission) can be removed at any time by uninstalling the
+Extension.</p>
+<h2 id="childrens-privacy">Children’s privacy</h2>
+<p>The Extension is not directed at children and does not knowingly
+collect any information from anyone, regardless of age, because it does
+not collect information from anyone at all.</p>
+<h2 id="changes-to-this-policy">Changes to this policy</h2>
+<p>If this policy changes, the “Last updated” date above will change
+accordingly. Continued use of the Extension after an update constitutes
+acceptance of the revised policy.</p>
+<h2 id="contact">Contact</h2>
+<p>Questions about this policy or the Extension can be sent to:
+<strong>[YOUR CONTACT EMAIL HERE]</strong></p>
+<p>Source code for the Extension: <strong>[YOUR REPOSITORY/PROJECT LINK
+HERE]</strong></p>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "name": "com.lass.downloadmanager",
+  "description": "Lass Download Manager Native Host",
+  "path": "LASS_EXE_PATH",
+  "type": "stdio",
+  "allowed_extensions": [
+    "lass@downloadmanager.local"
+  ]
+}

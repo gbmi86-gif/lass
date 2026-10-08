@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Lass Download Manager",
+  "version": "5.0",
+  "description": "Capture downloads and send them to Lass Download Manager v5",
+  "minimum_chrome_version": "130",
+
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvitV3okGR3BL2SAv/8aDvnBwiGb9TOya8RVjAFQMoLwKrHnnAmKb7Eaq+VqSf6uwxmdmdW/wWVsBWkAb951bnC8f86b+3N0MCQASHgYlw3SlXSvIkxAZLMy9HUM378wCJaOeQdg4h9jT4CERZOU7S50r/aEjQQbh7GKeSGrFaM/o08UweMdexFcYhmLqtH+6b3BrcSCBmG22jpXgjbPO+YDGahQ+GSAjqPvFCijYvGbuqb1BJWWSrcZ+Aq0y+e3tYVOlhXTwhKD9e15dHdoXw2BxLOy86oLyKHChg2wk+17XrR8W5B4uJ128liPEWSGjIInsENjL+xUUjTZRAQOM2wIDAQAB",
+
+  "permissions": [
+    "nativeMessaging",
+    "downloads",
+    "webRequest",
+    "contextMenus",
+    "notifications",
+    "storage"
+  ],
+
+  "host_permissions": [
+    "<all_urls>"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Lass Download Manager",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
