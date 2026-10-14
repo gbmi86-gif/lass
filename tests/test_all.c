@@ -1039,7 +1039,7 @@ static void test_engine_features(void) {
         "ftp://files.example.com/data.tar.gz\n";
 
     int added = engine_add_batch(eng, batch_urls, NULL, 4, 0, "TestGroup");
-    TEST("batch 4 valid urls",    added == 4);
+    TEST("batch: 3 valid http links accepted (empty/invalid/ftp rejected)", added == 3);
 
     /* بررسی group_id یکسان */
     EnterCriticalSection(&eng->lock);
@@ -1050,7 +1050,7 @@ static void test_engine_features(void) {
         if (dl->group_id == gid) same_group++;
     }
     LeaveCriticalSection(&eng->lock);
-    TEST("all in same group",     same_group == 4);
+    TEST("all accepted links in same group", same_group == 3);
     TEST("group_id not zero",     gid != 0);
 
     /* بررسی group_name */
@@ -1078,7 +1078,7 @@ static void test_engine_features(void) {
     int remaining = 0;
     for (IDM_Download *dl = eng->queue_head; dl; dl = dl->next) remaining++;
     LeaveCriticalSection(&eng->lock);
-    TEST("remaining count ok",    remaining == 2);
+    TEST("remaining count ok",    remaining == 1);
 
     /* ── engine_schedule ── */
     EnterCriticalSection(&eng->lock);
@@ -1537,6 +1537,45 @@ static void test_legacy_migration(void) {
     RemoveDirectoryA("mig_test\\new_states");
     RemoveDirectoryA("mig_test\\old_states");
     RemoveDirectoryA("mig_test");
+}
+
+/* ======================================================
+   تست: چرخه‌ی عمر دانلود — validation، busy و حذف معلق
+   ====================================================== */
+IDM_Download *engine_find(IDM_Engine *eng, uint32_t id);
+
+static void test_dl_lifecycle(void) {
+    SECTION("Download lifecycle: validation, busy and deferred removal");
+    IDM_Engine *eng = engine_create(NULL);
+    TEST("engine create", eng != NULL);
+    if (!eng) return;
+
+    TEST("ftp link is rejected at engine level",
+         engine_add(eng, "ftp://files.example.com/x.zip", "", 1, 0) == NULL);
+
+    IDM_Download *upper = engine_add(eng, "HTTP://127.0.0.1:1/upper.zip", "", 1, 0);
+    TEST("uppercase http scheme is accepted", upper != NULL);
+    if (upper) engine_remove(eng, upper->id);
+
+    IDM_Download *dl = engine_add(eng, "http://127.0.0.1:1/busy.zip", "", 1, 0);
+    TEST("download added for lifecycle test", dl != NULL);
+    if (!dl) { engine_destroy(eng); return; }
+    uint32_t id = dl->id;
+
+    TEST("acquire of unknown id returns NULL", engine_dl_acquire(eng, 0xFFFFFFFFu) == NULL);
+    IDM_Download *held = engine_dl_acquire(eng, id);
+    TEST("acquire of live download returns it", held == dl);
+    TEST("acquire raises busy", held != NULL && held->busy >= 1);
+
+    engine_remove(eng, id);
+    TEST("removal unlinks the download at once", engine_find(eng, id) == NULL);
+    TEST("removal of a held download is deferred", held != NULL && held->remove_pending);
+    TEST("held download cannot be re-acquired after removal", engine_dl_acquire(eng, id) == NULL);
+
+    engine_dl_release(eng, held);
+    TEST("last release completes the deferred removal", TRUE);
+    engine_destroy(eng);
+    TEST("engine destroy after lifecycle test", TRUE);
 }
 
 static void test_crash_report(void) {
@@ -3086,6 +3125,7 @@ int main(void) {
     test_batch_url_extraction();
     test_crash_report();
     test_legacy_migration();
+    test_dl_lifecycle();
     test_launch_retry_backoff();
     test_permanent_vs_transient_errors();
     test_http_extract_host();

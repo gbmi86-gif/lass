@@ -55,8 +55,8 @@ static inline bool validate_url(const char *url, int max_len) {
     }
 
     /* باید http:// یا https:// باشه */
-    if (strncmp(url, "http://",  7) != 0 &&
-        strncmp(url, "https://", 8) != 0)
+    if (_strnicmp(url, "http://",  7) != 0 &&
+        _strnicmp(url, "https://", 8) != 0)
         return false;
 
     return (len > 10);

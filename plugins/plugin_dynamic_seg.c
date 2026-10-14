@@ -30,8 +30,9 @@ typedef struct {
     CRITICAL_SECTION lock;
 
     /* لیست دانلودهای فعال که باید مانیتور بشن */
-    IDM_Download    *watch_list[64];
+    uint32_t         watch_ids[64];   /* فقط id — اشاره‌گر بیات دنبال نمی‌شود */
     int              watch_count;
+    IDM_Engine      *eng;             /* برای acquire/release امن در هر تیک */
 } DS_Priv;
 
 /* Global instance */
@@ -43,25 +44,33 @@ IDM_PluginHooks *g_ds_plugin_instance = NULL;
 static void ds_watch_add(DS_Priv *priv, IDM_Download *dl) {
     EnterCriticalSection(&priv->lock);
     for (int i = 0; i < priv->watch_count; i++)
-        if (priv->watch_list[i] == dl) {
+        if (priv->watch_ids[i] == dl->id) {
             LeaveCriticalSection(&priv->lock);
             return;
         }
-    if (priv->watch_count < 64)
-        priv->watch_list[priv->watch_count++] = dl;
+    if (priv->watch_count < 64) {
+        priv->watch_ids[priv->watch_count++] = dl->id;
+        priv->eng = dl->eng;
+    }
     LeaveCriticalSection(&priv->lock);
 }
 
-static void ds_watch_remove(DS_Priv *priv, IDM_Download *dl) {
+/* حذف با id: هرگز به اشاره‌گر دست نمی‌زند، پس برای ورودی‌های بیات هم امن است */
+static void ds_watch_remove_id(DS_Priv *priv, uint32_t id) {
     EnterCriticalSection(&priv->lock);
     for (int i = 0; i < priv->watch_count; i++) {
-        if (priv->watch_list[i] == dl) {
-            priv->watch_list[i] = priv->watch_list[--priv->watch_count];
-            priv->watch_list[priv->watch_count] = NULL;
+        if (priv->watch_ids[i] == id) {
+            priv->watch_count--;
+            priv->watch_ids[i] = priv->watch_ids[priv->watch_count];
+            priv->watch_ids[priv->watch_count] = 0;
             break;
         }
     }
     LeaveCriticalSection(&priv->lock);
+}
+
+static void ds_watch_remove(DS_Priv *priv, IDM_Download *dl) {
+    ds_watch_remove_id(priv, dl->id);
 }
 
 /* ======================================================
@@ -246,14 +255,19 @@ static DWORD WINAPI ds_monitor_thread(LPVOID param) {
         EnterCriticalSection(&priv->lock);
         int count = priv->watch_count;
         /* snapshot لیست */
-        IDM_Download *list[64];
-        memcpy(list, priv->watch_list, count * sizeof(IDM_Download *));
+        uint32_t ids[64];
+        memcpy(ids, priv->watch_ids, count * sizeof(uint32_t));
         LeaveCriticalSection(&priv->lock);
 
         for (int d = 0; d < count; d++) {
-            IDM_Download *dl = list[d];
-            if (!dl || dl->state != DL_DOWNLOADING) continue;
-            if (!dl->segments || !dl->eng) continue;
+            /* فقط با id کار می‌کنیم: acquire اگر دانلود زنده باشد busy را بالا می‌برد؛
+               اگر نباشد (حذف شده) همان لحظه از فهرست پاک می‌کنیم و اشاره‌گری دنبال نمی‌کنیم. */
+            IDM_Download *dl = engine_dl_acquire(priv->eng, ids[d]);
+            if (!dl) { ds_watch_remove_id(priv, ids[d]); continue; }
+            if (dl->state != DL_DOWNLOADING || !dl->segments) {
+                engine_dl_release(priv->eng, dl);
+                continue;
+            }
 
             /* ── همون fix کنار try_split ──
                dl->segments یه آرایه‌ست که ممکنه هر لحظه توسط
@@ -343,6 +357,7 @@ static DWORD WINAPI ds_monitor_thread(LPVOID param) {
                     try_split(priv, dl, seg);
                 }
             }
+            engine_dl_release(priv->eng, dl);
         }
     }
     shutdown_brake_unregister(brake_id);

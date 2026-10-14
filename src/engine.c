@@ -40,6 +40,14 @@
 #include "resume.h"
 #include "lass_log.h"
 #include "shutdown_brake.h"
+#include "../plugins/security_fixes.h"
+
+/* تخصیص آرایه‌ی اشاره‌گر segment با بررسی overflow */
+static IDM_Segment **alloc_seg_array(uint32_t n) {
+    size_t bytes = 0;
+    if (!safe_mul_size((size_t)n, sizeof(IDM_Segment *), &bytes)) return NULL;
+    return (IDM_Segment **)calloc(1, bytes);
+}
 
 /* ======================================================
    state اضافی برای راه‌اندازی async
@@ -181,7 +189,7 @@ static uint32_t pick_seg_count(const char *host, uint64_t size, uint32_t max_seg
            محتاطانه شروع کن، بر اساس واکنش واقعی سرور تطبیق بده. */
         if (n > trouble) n -= trouble; else n = 1;
     }
-    return n;
+    return clamp_segments(n, 1, max_seg);
 }
 
 uint32_t engine_test_pick_seg_count(const char *host, uint64_t size, uint32_t max_seg) {
@@ -383,7 +391,7 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
         IDM_ResumeSeg *saved = dl->resume_segs;
         uint32_t nseg        = dl->num_segments;
 
-        dl->segments = (IDM_Segment **)calloc(nseg, sizeof(IDM_Segment *));
+        dl->segments = alloc_seg_array(nseg);
         if (!dl->segments) goto fail;
 
         dl->writer = fw_open(dl->temp_path, dl->total_size, true);
@@ -422,7 +430,7 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
                         ? pick_seg_count(host, dl->total_size, dl->max_segments)
                         : 1;
         dl->num_segments = nseg;
-        dl->segments     = (IDM_Segment **)calloc(nseg, sizeof(IDM_Segment *));
+        dl->segments     = alloc_seg_array(nseg);
         if (!dl->segments) goto fail;
 
         dl->writer = fw_open(dl->temp_path, dl->total_size, true);
@@ -479,7 +487,12 @@ fail:
    همیشه تضمین‌شده اجرا میشه. */
 static DWORD WINAPI launch_thread(LPVOID param) {
     int brake_id = shutdown_brake_register("download_launch");
+    /* ctx در launch_thread_impl آزاد می‌شود؛ قبلش eng و dl را برمی‌داریم */
+    LaunchCtx    *ctx = (LaunchCtx *)param;
+    IDM_Engine   *eng = ctx->eng;
+    IDM_Download *dl  = ctx->dl;
     DWORD result = launch_thread_impl(param);
+    engine_dl_release(eng, dl);       /* busy گرفته‌شده در dispatch_launch */
     shutdown_brake_unregister(brake_id);
     return result;
 }
@@ -501,12 +514,14 @@ static void dispatch_launch(IDM_Engine *eng, IDM_Download *dl) {
     ctx->dl  = dl;
     dl->state = DL_LAUNCHING;
     eng->active_count++;
+    dl->busy++;                       /* thread launch تا پایان کارش این دانلود را نگه می‌دارد */
 
     HANDLE t = CreateThread(NULL, 0, launch_thread, ctx, 0, NULL);
     if (!t) {
         free(ctx);
         dl->state = DL_FAILED;
         eng->active_count--;
+        dl->busy--;
         return;
     }
     /* thread رو detach می‌کنیم — خودش تموم میشه */
@@ -843,6 +858,10 @@ IDM_Download *engine_add(IDM_Engine  *eng,
                           uint32_t     max_segments,
                           uint64_t     speed_limit) {
     if (!eng || !url) return NULL;
+    if (!validate_url(url, IDM_MAX_URL)) {
+        LOGW(LOG_MOD_ENGINE, "rejected download URL: only http/https without control characters are accepted");
+        return NULL;
+    }
 
     IDM_Download *dl = (IDM_Download *)calloc(1, sizeof(*dl));
     if (!dl) return NULL;
@@ -863,8 +882,10 @@ IDM_Download *engine_add(IDM_Engine  *eng,
        یه مسیر معتبر قبول می‌شد و بی‌صدا تا انتهای pipeline (temp_path
        = ".tels"، resume state، ...) می‌رفت. حالا هر دو یکسان
        fallback می‌شن. */
-    snprintf(dl->out_path, IDM_MAX_PATH, "%s",
-             (out_path && out_path[0]) ? out_path : "download.bin");
+    bool path_ok = (out_path && out_path[0] && validate_out_path(out_path));
+    if (out_path && out_path[0] && !path_ok)
+        LOGW(LOG_MOD_ENGINE, "rejected unsafe output path; using the default file name");
+    snprintf(dl->out_path, IDM_MAX_PATH, "%s", path_ok ? out_path : "download.bin");
 
     /* فایل .tels — این همون چیزیه که واقعاً روی دیسک حین دانلود
        نوشته میشه. چرا پسوند مجزا؟
@@ -944,94 +965,92 @@ uint64_t engine_get_global_speed_limit(IDM_Engine *eng) {
         (LONGLONG *)&g_global_speed_limit, 0, 0);
 }
 
+/* ======================================================
+   تخریب دانلودی که دیگر در لیست نیست و هیچ صاحبی ندارد (busy==0).
+   خارج از lock صدا زده می‌شود؛ چون unlink شده، هیچ thread دیگری به آن دسترسی ندارد.
+   ====================================================== */
+static void dl_teardown_unlinked(IDM_Download *dl) {
+    bool any_zombie = false;
+    if (dl->segments) {
+        for (uint32_t i = 0; i < dl->num_segments; i++)
+            if (dl->segments[i] && !seg_destroy(dl->segments[i])) any_zombie = true;
+        free(dl->segments);
+        dl->segments = NULL;
+    }
+    if (any_zombie) {
+        LOGE(LOG_MOD_ENGINE,
+             "dl#%u has a zombie segment — leaking IDM_Download, writer left open",
+             dl->id);
+        return;
+    }
+    if (dl->writer) fw_close(dl->writer);
+    free(dl->resume_segs);
+    DeleteCriticalSection(&dl->lock);
+    free(dl);
+}
+
+/* caller holds eng->lock: اسلات فعال فقط وقتی برگردانده می‌شود که دانلود هنوز در حالت
+   فعال (DOWNLOADING/LAUNCHING) است؛ هر مسیری که از این حالت خارج شود خودش شمارنده را
+   کم می‌کند، پس هیچ‌وقت دو بار کم نمی‌شود. */
+static void release_active_slot(IDM_Engine *eng, IDM_Download *dl) {
+    if (dl->state == DL_DOWNLOADING || dl->state == DL_LAUNCHING)
+        eng->active_count--;
+}
+
 void engine_pause(IDM_Engine *eng, uint32_t id) {
     if (!eng) return;
 
-    /* مرحله ۱: زیر lock فقط state رو تغییر بده و یه snapshot از
-       segment pointer ها بگیر — seg_pause نباید زیر lock صدا
-       زده بشه چون می‌تونه تا 10 ثانیه برای هر segment بلاک بشه
-       (WaitForSingleObject). اگه این کار رو زیر eng->lock انجام
-       بدیم، کل engine برای همه‌ی thread های دیگه (UI polling،
-       سایر دانلودها) فریز می‌شه — این دقیقاً علت هنگ کردن واقعی
-       دکمه‌ی Pause/Stop بود. */
     IDM_Segment **segs_snapshot = NULL;
     uint32_t      seg_count     = 0;
-    bool          was_active    = false;
     IDM_Download *dl_ref        = NULL;
 
+    /* مرحله ۱: زیر lock state را عوض کن، busy بگیر و snapshot بردار */
     EnterCriticalSection(&eng->lock);
     IDM_Download *dl = engine_find(eng, id);
     if (dl && (dl->state == DL_DOWNLOADING || dl->state == DL_LAUNCHING)) {
-        was_active = true;
-        /* عمداً DL_PAUSED نه — یه حالت گذرای DL_PAUSING تا وقتی
-           segment thread ها واقعاً متوقف بشن. اگه اینجا مستقیم
-           DL_PAUSED ست می‌شد، engine_resume می‌تونست همون لحظه
-           (چون precondition‌ش state==PAUSED هست) شروع کنه به
-           NULL کردن dl->segments، درحالی‌که همین تابع هنوز پایین‌تر
-           داره از همون آرایه (resume_save) می‌خونه — دقیقاً همون
-           race ای که باعث crash واقعی (null-deref) شده بود. */
-        dl->state  = DL_PAUSING;
-        dl_ref     = dl;
-        seg_count  = dl->num_segments;
+        dl_ref    = dl;
+        dl->state = DL_PAUSING;
+        dl->busy++;                    /* تا پایان توقف segment ها، dl آزاد نمی‌شود */
+        seg_count = dl->num_segments;
         if (seg_count > 0 && dl->segments) {
-            segs_snapshot = (IDM_Segment **)malloc(
-                sizeof(IDM_Segment *) * seg_count);
+            segs_snapshot = (IDM_Segment **)malloc(sizeof(IDM_Segment *) * seg_count);
             if (segs_snapshot) {
                 for (uint32_t i = 0; i < seg_count; i++)
                     segs_snapshot[i] = dl->segments[i];
             } else {
-                seg_count = 0; /* malloc fail — رد می‌کنیم، بهتر از crash */
+                seg_count = 0;
             }
         }
-        if (was_active) eng->active_count--;
-        /* توجه: اینجا هنوز notify نمی‌کنیم — پایین‌تر، وقتی واقعاً
-           DL_PAUSED شد، پیام میره. اگه همین‌جا DL_PAUSED رو به UI/
-           پلاگین‌ها اطلاع بدیم (که قبلاً می‌داد)، smart_resume
-           پلاگین هم می‌تونست دقیقاً همون لحظه sr_save رو صدا بزنه و
-           به همون آرایه‌ی segments که هنوز در حال teardown هست
-           دسترسی پیدا کنه. */
+        eng->active_count--;
     }
     LeaveCriticalSection(&eng->lock);
+    if (!dl_ref) return;
 
-    /* مرحله ۲: خارج از lock، صبر کن segment thread ها واقعاً
-       متوقف بشن. حالا اگه طول بکشه، فقط همین تابع (و خود دانلود)
-       منتظر می‌مونه، نه کل موتور. */
+    /* مرحله ۲: خارج از lock، منتظر توقف واقعی segment ها بمان */
     if (segs_snapshot) {
         for (uint32_t i = 0; i < seg_count; i++)
             if (segs_snapshot[i]) seg_pause(segs_snapshot[i]);
         free(segs_snapshot);
     }
 
-    /* resume_save بعد از توقف واقعی segment ها — اینطوری
-       seg->current مقدار نهایی و دقیق رو منعکس می‌کنه، نه یه
-       مقدار میانی که ممکنه هنوز در حال تغییر باشه.
-       حیاتی: dl_ref ممکنه dangling شده باشه اگه بین
-       LeaveCriticalSection بالا و اینجا، یه thread دیگه (مثلاً
-       کاربر که خیلی سریع Remove زده) همین دانلود رو engine_remove
-       کرده باشه و حافظه‌ش آزاد شده باشه. باید id رو دوباره با
-       engine_find تأیید کنیم تا مطمئن بشیم dl_ref هنوز معتبره —
-       این دقیقاً همون use-after-free بود که می‌تونست باعث crash
-       کل برنامه روی Pause/Stop بشه. */
-    if (was_active && dl_ref) {
-        EnterCriticalSection(&eng->lock);
-        IDM_Download *still_valid = engine_find(eng, id);
-        if (still_valid == dl_ref) {
-            /* حالا segment teardown واقعاً تموم شده (چه موفق چه
-               zombie) و dl_ref->segments دیگه توسط کس دیگه‌ای در
-               حال دستکاری نیست — امن‌ه که واقعاً DL_PAUSED بشه و
-               به UI/پلاگین‌ها اطلاع بدیم. این دقیقاً همون نقطه‌ایه
-               که قبلاً (اشتباهاً) اول تابع اتفاق می‌افتاد. */
-            dl_ref->state = DL_PAUSED;
-            resume_save(dl_ref);
-            if (eng->notify_hwnd)
-                PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
-                             (WPARAM)id, (LPARAM)DL_PAUSED);
-        } else {
-            LOGW(LOG_MOD_ENGINE,
-                 "dl#%u no longer valid after pause — skip resume_save "
-                 "(likely removed concurrently)", id);
-        }
-        LeaveCriticalSection(&eng->lock);
+    /* مرحله ۳: busy را پس بده؛ اگر حذف معلق بود و صاحب دیگری نیست، خودمان تخریب می‌کنیم */
+    bool teardown = false;
+    EnterCriticalSection(&eng->lock);
+    dl_ref->busy--;
+    if (dl_ref->remove_pending) {
+        release_active_slot(eng, dl_ref);
+        teardown = (dl_ref->busy == 0);
+    } else {
+        dl_ref->state = DL_PAUSED;
+        resume_save(dl_ref);
+        if (eng->notify_hwnd)
+            PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
+                         (WPARAM)id, (LPARAM)DL_PAUSED);
+    }
+    LeaveCriticalSection(&eng->lock);
+    if (teardown) {
+        LOGI(LOG_MOD_ENGINE, "dl#%u deferred removal completed by the last holder", dl_ref->id);
+        dl_teardown_unlinked(dl_ref);
     }
 }
 
@@ -1096,14 +1115,13 @@ void engine_cancel(IDM_Engine *eng, uint32_t id) {
     EnterCriticalSection(&eng->lock);
     IDM_Download *dl = engine_find(eng, id);
     if (dl) {
-        bool was_active = (dl->state == DL_DOWNLOADING ||
-                           dl->state == DL_LAUNCHING);
+        bool was_active = (dl->state == DL_DOWNLOADING || dl->state == DL_LAUNCHING);
         dl->state = DL_CANCELLED;
+        dl->busy++;
         dl_ref    = dl;
         seg_count = dl->num_segments;
         if (seg_count > 0 && dl->segments) {
-            segs_snapshot = (IDM_Segment **)malloc(
-                sizeof(IDM_Segment *) * seg_count);
+            segs_snapshot = (IDM_Segment **)malloc(sizeof(IDM_Segment *) * seg_count);
             if (segs_snapshot) {
                 for (uint32_t i = 0; i < seg_count; i++)
                     segs_snapshot[i] = dl->segments[i];
@@ -1117,84 +1135,56 @@ void engine_cancel(IDM_Engine *eng, uint32_t id) {
                          (WPARAM)id, (LPARAM)DL_CANCELLED);
     }
     LeaveCriticalSection(&eng->lock);
+    if (!dl_ref) return;
 
-    /* همون fix که در engine_pause اعمال شد — seg_pause بلاک‌شونده
-       باید خارج از eng->lock صدا زده بشه تا کل موتور فریز نشه */
     if (segs_snapshot) {
         for (uint32_t i = 0; i < seg_count; i++)
             if (segs_snapshot[i]) seg_pause(segs_snapshot[i]);
         free(segs_snapshot);
     }
 
-    if (dl_ref) {
-        EnterCriticalSection(&eng->lock);
-        IDM_Download *still_valid = engine_find(eng, id);
-        if (still_valid == dl_ref) {
-            resume_remove(dl_ref);
-
-            /* باگ واقعی که اینجا فیکس شد: بر خلاف engine_pause/
-               engine_resume/engine_remove، این تابع قبلاً بدون چک
-               کردن seg->zombie مستقیماً fw_close(dl_ref->writer) رو
-               صدا می‌زد. اگه یکی از segment ها به seg_pause بالا
-               (۱۰ ثانیه صبر) جواب نده و zombie بشه، worker thread‌ش
-               هنوز واقعاً زنده‌ست و می‌تونه هر لحظه fw_write(dl->writer,
-               ...) رو صدا بزنه — یعنی یه use-after-free مستقیم روی
-               IDM_FileWriter تازه-freeشده (fw_close هم CloseHandle
-               می‌کنه هم DeleteCriticalSection هم free(fw)). حالا،
-               دقیقاً مثل بقیه‌ی توابع، اگه هر segment ای zombie شده
-               باشه writer رو نمی‌بندیم و باز می‌ذاریمش (leak عمدی و
-               امن، به‌جای crash). */
-            bool any_zombie = false;
-            if (dl_ref->segments) {
-                for (uint32_t i = 0; i < dl_ref->num_segments; i++) {
-                    IDM_Segment *s = dl_ref->segments[i];
-                    if (s && s->zombie) { any_zombie = true; break; }
-                }
+    bool teardown = false;
+    EnterCriticalSection(&eng->lock);
+    dl_ref->busy--;
+    if (dl_ref->remove_pending) {
+        /* کاربر در همین فاصله حذف کرده: منابع را همین‌جا آزاد نکن؛ تخریب با آخرین صاحب است */
+        release_active_slot(eng, dl_ref);
+        teardown = (dl_ref->busy == 0);
+    } else {
+        bool any_zombie = false;
+        if (dl_ref->segments) {
+            for (uint32_t i = 0; i < dl_ref->num_segments; i++) {
+                IDM_Segment *s = dl_ref->segments[i];
+                if (s && s->zombie) { any_zombie = true; break; }
             }
-            if (any_zombie) {
-                LOGE(LOG_MOD_ENGINE,
-                     "dl#%u has a zombie segment after cancel — "
-                     "writer left open (leaking) to avoid use-after-free",
-                     id);
-            } else if (dl_ref->writer) {
-                fw_close(dl_ref->writer);
-                dl_ref->writer = NULL;
-            }
-        } else {
-            LOGW(LOG_MOD_ENGINE,
-                 "dl#%u no longer valid after cancel — skip cleanup "
-                 "(likely removed concurrently)", id);
-            dl_ref = NULL; /* جلوگیری از استفاده در ادامه */
         }
-        LeaveCriticalSection(&eng->lock);
-
-        /* کاربر صراحتاً Cancel کرده (نه Pause) — فایل .tels ناقص
-           دیگه به دردی نمی‌خوره، پس پاکش می‌کنیم تا روی دیسک
-           جا نمونه. این عملیات فایل‌سیستمی سریعه.
-           نکته: dl_ref ممکنه بالا به NULL ست شده باشه اگه دانلود
-           همزمان remove شده بود — چک می‌کنیم. */
-        if (dl_ref && dl_ref->temp_path[0]) DeleteFileA(dl_ref->temp_path);
+        resume_remove(dl_ref);
+        if (any_zombie) {
+            LOGE(LOG_MOD_ENGINE,
+                 "dl#%u has a zombie segment after cancel — writer left open "
+                 "to avoid use-after-free", id);
+        } else if (dl_ref->writer) {
+            fw_close(dl_ref->writer);
+            dl_ref->writer = NULL;
+        }
+    }
+    LeaveCriticalSection(&eng->lock);
+    if (teardown) {
+        LOGI(LOG_MOD_ENGINE, "dl#%u deferred removal completed by the last holder", dl_ref->id);
+        dl_teardown_unlinked(dl_ref);
     }
 }
 
 void engine_remove(IDM_Engine *eng, uint32_t id) {
     if (!eng) return;
 
-    IDM_Segment **segs_snapshot = NULL;
-    uint32_t      seg_count     = 0;
-    IDM_Download *dl_found      = NULL;
-
     EnterCriticalSection(&eng->lock);
-
-    /* مرحله ۱: پیدا کردن و unlink کردن از لیست — زیر lock کوتاه.
-       seg_destroy (که شامل seg_pause بلاک‌شونده هست) رو هنوز
-       صدا نمی‌زنیم، فقط آدرس segment ها رو snapshot می‌گیریم. */
     IDM_Download **pp = &eng->queue_head;
+    IDM_Download  *dl = NULL;
     while (*pp) {
         if ((*pp)->id == id) {
-            IDM_Download *dl = *pp;
+            dl = *pp;
             *pp = dl->next;
-
             if (eng->queue_tail == dl) {
                 IDM_Download *prev = NULL;
                 for (IDM_Download *t = eng->queue_head; t && t->next; t = t->next)
@@ -1202,63 +1192,53 @@ void engine_remove(IDM_Engine *eng, uint32_t id) {
                 eng->queue_tail = prev;
                 if (!eng->queue_head) eng->queue_tail = NULL;
             }
-
-            bool was_active = (dl->state == DL_DOWNLOADING ||
-                               dl->state == DL_LAUNCHING);
-            if (was_active) eng->active_count--;
-
-            seg_count = dl->num_segments;
-            if (seg_count > 0 && dl->segments) {
-                segs_snapshot = (IDM_Segment **)malloc(
-                    sizeof(IDM_Segment *) * seg_count);
-                if (segs_snapshot) {
-                    for (uint32_t i = 0; i < seg_count; i++)
-                        segs_snapshot[i] = dl->segments[i];
-                } else {
-                    seg_count = 0;
-                }
-            }
-            dl_found = dl;
             break;
         }
         pp = &(*pp)->next;
     }
+    if (!dl) {
+        LeaveCriticalSection(&eng->lock);
+        return;
+    }
 
+    if (dl->busy > 0) {
+        /* یک thread دیگر (pause/cancel/launch/مانیتور) هنوز از این دانلود استفاده می‌کند.
+           فقط unlink کردیم؛ تخریب و آزادسازی اسلات فعال با آخرین صاحب است. */
+        dl->remove_pending = true;
+        LOGI(LOG_MOD_ENGINE, "dl#%u removal deferred: %u holder(s) still using it", dl->id, dl->busy);
+        LeaveCriticalSection(&eng->lock);
+        return;
+    }
+
+    release_active_slot(eng, dl);
     LeaveCriticalSection(&eng->lock);
+    dl_teardown_unlinked(dl);
+}
 
-    /* مرحله ۲: خارج از lock، segment thread ها رو متوقف کن —
-       همون fix که در pause/cancel اعمال شد. seg_destroy خودش
-       seg_pause (بلاک‌شونده) رو صدا می‌زنه، پس مستقیماً اینجا
-       (بدون lock) صداش می‌زنیم. */
-    bool any_zombie = false;
-    if (segs_snapshot) {
-        for (uint32_t i = 0; i < seg_count; i++)
-            if (segs_snapshot[i])
-                if (!seg_destroy(segs_snapshot[i])) any_zombie = true;
-        free(segs_snapshot);
-    }
+/* ======================================================
+   دسترسی امن برای مانیتور و سایر thread های خارج از engine
+   ====================================================== */
+IDM_Download *engine_dl_acquire(IDM_Engine *eng, uint32_t id) {
+    if (!eng) return NULL;
+    EnterCriticalSection(&eng->lock);
+    IDM_Download *dl = engine_find(eng, id);
+    if (dl) dl->busy++;
+    LeaveCriticalSection(&eng->lock);
+    return dl;
+}
 
-    /* مرحله ۳: آزادسازی باقی منابع dl — این بخش‌ها سریع و
-       غیر-blocking هستن، پس زیر lock کوتاه قابل قبوله (هرچند
-       چون dl از لیست unlink شده، حتی بدون lock هم امنه چون هیچ
-       thread دیگه‌ای دیگه بهش دسترسی نداره) */
-    if (dl_found) {
-        free(dl_found->segments);
-        if (any_zombie) {
-            /* یه segment thread على‌رغم abort هنوز زنده‌ست. dl_found
-               رو الان آزاد نمی‌کنیم و writer رو نمی‌بندیم — اون
-               thread هنوز ممکنه بهشون دسترسی داشته باشه. leak عمدیِ
-               کل dl، ترجیح داده‌شده به use-after-free قطعی. */
-            LOGE(LOG_MOD_ENGINE,
-                 "dl#%u has a zombie segment — leaking IDM_Download, "
-                 "writer left open", id);
-            return;
-        }
-        if (dl_found->writer) fw_close(dl_found->writer);
-        free(dl_found->resume_segs);
-        DeleteCriticalSection(&dl_found->lock);
-        free(dl_found);
+void engine_dl_release(IDM_Engine *eng, IDM_Download *dl) {
+    if (!eng || !dl) return;
+    bool teardown = false;
+    EnterCriticalSection(&eng->lock);
+    if (dl->busy > 0) dl->busy--;
+    if (dl->busy == 0 && dl->remove_pending) {
+        release_active_slot(eng, dl);
+        teardown = true;
+        LOGI(LOG_MOD_ENGINE, "dl#%u deferred removal completed by the last holder", dl->id);
     }
+    LeaveCriticalSection(&eng->lock);
+    if (teardown) dl_teardown_unlinked(dl);
 }
 
 IDM_Download *engine_find(IDM_Engine *eng, uint32_t id) {

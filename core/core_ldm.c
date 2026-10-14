@@ -141,7 +141,6 @@ static LRESULT CALLBACK core_msg_wnd_proc(HWND hwnd, UINT msg,
    ====================================================== */
 static void core_on_engine_msg(LDM_Core *core, UINT msg,
                                  WPARAM wp, LPARAM lp) {
-    if (!core->notify_cb) return;
 
     uint32_t id = (uint32_t)wp;
     LDM_Notify n = {0};
@@ -238,7 +237,7 @@ static void core_on_engine_msg(LDM_Core *core, UINT msg,
 
     LeaveCriticalSection(&core->engine->lock);
 
-    core->notify_cb(&n, core->notify_userdata);
+    if (core->notify_cb) core->notify_cb(&n, core->notify_userdata);
 }
 
 /* ======================================================

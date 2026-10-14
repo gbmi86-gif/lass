@@ -70,6 +70,11 @@ struct IDM_Download {
     /* Config snapshot */
     uint32_t         max_segments;
     bool             accept_ranges;
+    /* تملک برای کار بیرون از lock (pause/cancel/launch/مانیتور): busy>0 یعنی یک thread
+       همین الان به segment ها یا thread launch وابسته است؛ remove_pending یعنی حذف
+       خواسته شده ولی تخریب به آخرین صاحب busy سپرده شده. */
+    uint32_t         busy;
+    bool             remove_pending;
 
     /* validator های فایل روی سرور (از HEAD اولیه) — برای If-Range
        موقع ادامه‌ی دانلود: به‌جای اینکه کورکورانه فرض کنیم فایل
@@ -153,6 +158,14 @@ void         engine_destroy(IDM_Engine *eng);
    plugins_signal_shutdown). idempotent — صدا زدن چندباره (یا صدا
    نزدن، چون engine_destroy هم خودش این کار رو می‌کنه) کاملاً امنه. */
 void         engine_signal_shutdown(IDM_Engine *eng);
+
+/* دسترسی امن به یک دانلود از بیرون engine: اگر دانلود با این id هنوز در لیست باشد،
+   busy را بالا می‌برد و اشاره‌گر را برمی‌گرداند؛ وگرنه NULL. هر acquire موفق باید
+   با engine_dl_release جفت شود. */
+IDM_Download *engine_dl_acquire(IDM_Engine *eng, uint32_t id);
+/* busy را پایین می‌آورد؛ اگر حذف معلق باشد و صاحب دیگری نماند، تخریب را انجام می‌دهد.
+   بعد از این فراخوانی dl ممکن است دیگر معتبر نباشد. */
+void          engine_dl_release(IDM_Engine *eng, IDM_Download *dl);
 
 /* گزارش یه stall واقعی (بعد از عبور از stall_timeout_sec، نه یه
    خوندن لحظه‌ای) روی یه host مشخص — dynamic_seg این رو موقع
