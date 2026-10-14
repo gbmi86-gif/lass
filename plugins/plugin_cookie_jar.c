@@ -16,6 +16,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdbool.h>
+#include "../src/legacy_data.h"
 #include "plugin_cookie_jar.h"
 #include "../src/lass_log.h"
 
@@ -301,7 +302,7 @@ static void cj_save_file(CJ_Priv *priv) {
     if (!f) { LeaveCriticalSection(&priv->lock); return; }
 
     fprintf(f, "# Netscape HTTP Cookie File\n");
-    fprintf(f, "# IDM-Clone Cookie Jar\n\n");
+    fprintf(f, "# Lass Cookie Jar\n\n");
 
     time_t now = time(NULL);
     for (int i = 0; i < priv->count; i++) {
@@ -599,12 +600,19 @@ IDM_PluginHooks *cookie_jar_plugin_create(const char *cookie_file) {
         safe_copy(priv->cookie_file, IDM_MAX_PATH, cookie_file);
     } else {
         char appdata[IDM_MAX_PATH] = {0};
-        #define CJ_SUFFIX      "\\IDM-Clone\\cookies.txt"
-        #define CJ_SUFFIX_LEN  22
+        #define CJ_SUFFIX         "\\Lass\\cookies.txt"
+        #define CJ_LEGACY_SUFFIX  "\\IDM-Clone\\cookies.txt"
         if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata) == S_OK) {
-            int ap_max = IDM_MAX_PATH - CJ_SUFFIX_LEN - 2;
+            int ap_max = IDM_MAX_PATH - (int)sizeof(CJ_LEGACY_SUFFIX) - 2;
             snprintf(priv->cookie_file, IDM_MAX_PATH, "%.*s%s",
                      ap_max, appdata, CJ_SUFFIX);
+            /* یک‌بار: اگر فایل جدید نیست، کوکی‌های نسخه‌ی قدیمی را کپی کن؛
+               فایل قدیمی دست‌نخورده می‌ماند. */
+            char legacy[IDM_MAX_PATH] = {0};
+            snprintf(legacy, IDM_MAX_PATH, "%.*s%s",
+                     ap_max, appdata, CJ_LEGACY_SUFFIX);
+            legacy_copy_file_if_missing(legacy, priv->cookie_file);
+
         } else {
             strcpy(priv->cookie_file, ".\\cookies.txt");
         }

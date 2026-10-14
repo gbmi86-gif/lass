@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "../src/legacy_data.h"
 #include "plugin_smart_resume.h"
 #include "../src/lass_log.h"
 
@@ -401,19 +402,26 @@ IDM_PluginHooks *smart_resume_plugin_create(const char *state_dir,
     if (state_dir)
         snprintf(priv->state_dir, IDM_MAX_PATH, "%s", state_dir);
     else {
-        /* پیش‌فرض: %APPDATA%\IDM-Clone\states
-           appdata معمولاً ~40 کاراکتره، پسوند 17 کاراکتر
+        /* پیش‌فرض: %APPDATA%\Lass\states
+           appdata معمولاً ~40 کاراکتره، پسوند کوتاه
            برای اطمینان طول appdata رو محدود می‌کنیم */
         char appdata[IDM_MAX_PATH] = {0};
-        #define SR_APPDATA_SUFFIX "\\IDM-Clone\\states"
-        #define SR_APPDATA_SUFFIX_LEN 17
+        #define SR_APPDATA_SUFFIX "\\Lass\\states"
+        #define SR_LEGACY_SUFFIX  "\\IDM-Clone\\states"
         if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata) == S_OK) {
-            int ap_max = IDM_MAX_PATH - SR_APPDATA_SUFFIX_LEN - 2;
+            int ap_max = IDM_MAX_PATH - (int)sizeof(SR_LEGACY_SUFFIX) - 2;
             snprintf(priv->state_dir, IDM_MAX_PATH, "%.*s%s",
                      ap_max, appdata, SR_APPDATA_SUFFIX);
+            /* یک‌بار: فایل‌های .dat نسخه‌ی قدیمی را (اگر در مسیر جدید نیستند)
+               کپی کن تا دانلودهای نیمه‌کاره‌ی قبل از آپدیت قابل ادامه باشند. */
+            char legacy[IDM_MAX_PATH] = {0};
+            snprintf(legacy, IDM_MAX_PATH, "%.*s%s",
+                     ap_max, appdata, SR_LEGACY_SUFFIX);
+            legacy_copy_dat_dir_if_missing(legacy, priv->state_dir);
+
         }
         else
-            strcpy(priv->state_dir, ".\\idm_states");
+            strcpy(priv->state_dir, ".\\lass_states");
     }
 
     if (xor_key)

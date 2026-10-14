@@ -1,4 +1,4 @@
-# IDM-Clone v4.0
+# Lass v5
 دانلود منیجر سریع برای ویندوز
 
 ---
@@ -6,7 +6,7 @@
 ## ساختار پروژه
 
 ```
-IDM-Clone/
+Lass/
 │
 ├── src/               ← کد اصلی (هرگز تغییر نمی‌کند)
 │   ├── types.h        - تعریف‌های پایه
@@ -62,12 +62,13 @@ MinGW-w64 (MSYS2 یا winlibs)
 
 ### روش سریع
 ```bat
-build.bat
+cmake -S . -B build -G "MinGW Makefiles"
+cmake --build build
 ```
 
 سه خروجی تولید می‌شه:
-- `build\IDM-Clone.exe` - نسخه اصلی
-- `build\IDM-Clone-debug.exe` - با CHMML leak detector
+- `build\Lass.exe` - نسخه اصلی
+- `build\Lass.exe` (پیکربندی Debug) - CHMML leak detector فعال است
 - `build\test_all.exe` - تست یکپارچه
 
 ### روش CMake
@@ -88,7 +89,7 @@ cmake --build build
 ## پلاگین‌ها
 
 ### Smart Resume
-فایل state با پسوند `.dat` در `%APPDATA%\IDM-Clone\states\` ذخیره می‌شه.
+فایل state با پسوند `.dat` در `%APPDATA%\Lass\states\` ذخیره می‌شه.
 - fingerprint با FNV-1a hash
 - CRC32 روی هر segment
 - رمزگذاری XOR

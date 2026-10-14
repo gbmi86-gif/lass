@@ -57,6 +57,7 @@
 #include "../src/engine.h"
 #include "../plugins/plugins_setup.h"
 #include "../src/crash_report.h"
+#include "../src/legacy_data.h"
 #include "../src/queue_persist.h"
 #include "../src/settings.h"
 #include "../src/i18n.h"
@@ -1471,6 +1472,71 @@ static int crash_depth_probe(int n) {
     er.ExceptionAddress = (PVOID)(uintptr_t)ctx.Rip;
     EXCEPTION_POINTERS ep = { &er, &ctx };
     return crash_report_log(&ep);
+}
+
+/* ======================================================
+   تست: انتقال داده‌های نسخه‌ی قدیمی (پوشه‌ی قدیمی → Lass)
+   ====================================================== */
+static void mig_write(const char *path, const char *text) {
+    FILE *f = fopen(path, "w");
+    if (f) { fputs(text, f); fclose(f); }
+}
+
+static int mig_read_line(const char *path, char *out, size_t sz) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int ok = (fgets(out, (int)sz, f) != NULL);
+    fclose(f);
+    return ok;
+}
+
+static void test_legacy_migration(void) {
+    SECTION("Legacy data migration (old folder -> Lass)");
+    CreateDirectoryA("mig_test", NULL);
+    CreateDirectoryA("mig_test\\old_states", NULL);
+
+    mig_write("mig_test\\old_cookies.txt", "old-data\n");
+    int c1 = legacy_copy_file_if_missing("mig_test\\old_cookies.txt",
+                                         "mig_test\\new\\cookies.txt");
+    TEST("single file is copied (creating the new folder)", c1 == 1);
+    char buf[64] = {0};
+    TEST("copied content is identical",
+         mig_read_line("mig_test\\new\\cookies.txt", buf, sizeof(buf)) &&
+         strcmp(buf, "old-data\n") == 0);
+
+    mig_write("mig_test\\old_cookies.txt", "changed\n");
+    int c2 = legacy_copy_file_if_missing("mig_test\\old_cookies.txt",
+                                         "mig_test\\new\\cookies.txt");
+    TEST("existing destination is never overwritten", c2 == 0);
+    memset(buf, 0, sizeof(buf));
+    mig_read_line("mig_test\\new\\cookies.txt", buf, sizeof(buf));
+    TEST("destination content kept after a second call", strcmp(buf, "old-data\n") == 0);
+    TEST("legacy source is left intact",
+         GetFileAttributesA("mig_test\\old_cookies.txt") != INVALID_FILE_ATTRIBUTES);
+    TEST("missing legacy file is a no-op",
+         legacy_copy_file_if_missing("mig_test\\nope.txt", "mig_test\\x.txt") == 0);
+
+    mig_write("mig_test\\old_states\\a.dat", "A");
+    mig_write("mig_test\\old_states\\b.dat", "B");
+    mig_write("mig_test\\old_states\\skip.txt", "X");
+    int d1 = legacy_copy_dat_dir_if_missing("mig_test\\old_states", "mig_test\\new_states");
+    TEST("only .dat state files are migrated", d1 == 2);
+    TEST("non-.dat file is not migrated",
+         GetFileAttributesA("mig_test\\new_states\\skip.txt") == INVALID_FILE_ATTRIBUTES);
+    int d2 = legacy_copy_dat_dir_if_missing("mig_test\\old_states", "mig_test\\new_states");
+    TEST("second directory migration copies nothing", d2 == 0);
+
+    DeleteFileA("mig_test\\old_cookies.txt");
+    DeleteFileA("mig_test\\new\\cookies.txt");
+    DeleteFileA("mig_test\\old_states\\a.dat");
+    DeleteFileA("mig_test\\old_states\\b.dat");
+    DeleteFileA("mig_test\\old_states\\skip.txt");
+    DeleteFileA("mig_test\\new_states\\a.dat");
+    DeleteFileA("mig_test\\new_states\\b.dat");
+    RemoveDirectoryA("mig_test\\new");
+    RemoveDirectoryA("mig_test\\new_states");
+    RemoveDirectoryA("mig_test\\old_states");
+    RemoveDirectoryA("mig_test");
 }
 
 static void test_crash_report(void) {
@@ -3019,6 +3085,7 @@ int main(void) {
     test_server_negotiation();
     test_batch_url_extraction();
     test_crash_report();
+    test_legacy_migration();
     test_launch_retry_backoff();
     test_permanent_vs_transient_errors();
     test_http_extract_host();

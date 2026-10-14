@@ -43,7 +43,7 @@ static char *hls_http_get_text(const char *url, int *out_len) {
     if (!url || !out_len) return NULL;
     *out_len = 0;
 
-    HINTERNET hInet = InternetOpenA("IDM-Clone/HLS",
+    HINTERNET hInet = InternetOpenA("Lass/HLS",
                                      INTERNET_OPEN_TYPE_PRECONFIG,
                                      NULL, NULL, 0);
     if (!hInet) return NULL;

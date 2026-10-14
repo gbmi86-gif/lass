@@ -15,7 +15,7 @@
 /* wininet linked via -lwininet in build.bat / CMakeLists.txt */
 
 /* ── User-Agent ──
-   قبلاً "IDM-Clone/1.0 (Windows)" بود — که خودش رو صریحاً به‌عنوان
+   قبلاً "[UA قدیمی]" بود — که خودش رو صریحاً به‌عنوان
    یه download manager معرفی می‌کنه. خیلی از سایت‌های میزبان فایل
    (مخصوصاً mirrorهای دانلود گیم/رپک) دقیقاً به همین دلیل با ۴۰۳
    رد می‌کنن، چون سیستم‌های anti-leech/hotlink-protectionشون رشته‌ی

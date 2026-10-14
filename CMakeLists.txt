@@ -20,6 +20,7 @@ set(SRC_FILES
     src/shutdown_brake.c
     src/checksum.c
     src/crash_report.c
+    src/legacy_data.c
     src/i18n.c)
 
 set(PLUGIN_FILES

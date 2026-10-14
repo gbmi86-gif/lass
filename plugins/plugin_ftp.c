@@ -80,7 +80,7 @@ static BOOL parse_ftp_url(const char *url, FTP_URL *out) {
     } else {
         /* anonymous */
         strcpy(out->user, "anonymous");
-        strcpy(out->pass, "idm-clone@example.com");
+        strcpy(out->pass, "lass@example.com");
     }
 
     /* host[:port] */
@@ -123,7 +123,7 @@ static BOOL parse_ftp_url(const char *url, FTP_URL *out) {
    ====================================================== */
 static HINTERNET ftp_open_session(void) {
     return InternetOpenA(
-        "IDM-Clone/1.0 (FTP)",
+        "Lass/1.0 (FTP)",
         INTERNET_OPEN_TYPE_PRECONFIG,
         NULL, NULL, 0);
 }

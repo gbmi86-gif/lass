@@ -451,3 +451,8 @@ void dynamic_seg_plugin_destroy(IDM_PluginHooks *plugin) {
         g_ds_plugin_instance = NULL;
     free(plugin);
 }
+
+int dynamic_seg_test_watch_count(void) {
+    if (!g_ds_plugin_instance || !g_ds_plugin_instance->priv) return -1;
+    return ((DS_Priv *)g_ds_plugin_instance->priv)->watch_count;
+}

@@ -10,7 +10,7 @@
 #include <stddef.h>
 
 /* ======================================================
-   IDM-Clone  –  shared type definitions
+   Lass  –  shared type definitions
    ====================================================== */
 
 #define IDM_VERSION_STR   "1.0.0"

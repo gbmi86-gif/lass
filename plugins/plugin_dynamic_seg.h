@@ -30,6 +30,9 @@ void             dynamic_seg_plugin_destroy(IDM_PluginHooks *plugin);
    شده، سریع/بدون تأخیر عمل می‌کنه. */
 void             dynamic_seg_plugin_signal_stop(IDM_PluginHooks *plugin);
 
+/* فقط برای تست: تعداد دانلودهای فعلاً watch‌شده توسط مانیتور */
+int              dynamic_seg_test_watch_count(void);
+
 /* ── فقط برای تست ──
    wrapper صادرشده‌ی seg_is_stalled (که در plugin_dynamic_seg.c
    static هست) تا test_all.c بتونه دقیقاً همون منطق واقعی
