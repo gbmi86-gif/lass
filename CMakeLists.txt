@@ -21,6 +21,8 @@ set(SRC_FILES
     src/checksum.c
     src/crash_report.c
     src/legacy_data.c
+    src/transport.c
+    src/url_secure.c
     src/i18n.c)
 
 set(PLUGIN_FILES
@@ -51,7 +53,7 @@ add_library(idm_lib STATIC
 target_include_directories(idm_lib PUBLIC src plugins core)
 
 add_executable(Lass WIN32 main.c resource.rc)
-target_link_libraries(Lass PRIVATE idm_lib
+target_link_libraries(Lass PRIVATE idm_lib ws2_32
     wininet comctl32 comdlg32 shell32 user32 gdi32 ole32 uuid shlwapi crypt32)
 # قبلاً هیچ static linking‌ای در مسیر CMake (که مسیر build واقعی
 # پروژه‌ست) وجود نداشت — یعنی Lass.exe به DLLهای runtime خودِ
@@ -62,7 +64,7 @@ target_link_libraries(Lass PRIVATE idm_lib
 target_link_options(Lass PRIVATE -static)
 
 enable_testing()
-add_executable(test_all tests/test_all.c tests/test_httpd.c)
+add_executable(test_all tests/test_all.c tests/test_httpd.c tests/test_ftpd.c)
 target_link_libraries(test_all PRIVATE idm_lib
     wininet ws2_32 comctl32 comdlg32 shell32 user32 gdi32 ole32 uuid shlwapi crypt32)
 target_include_directories(test_all PUBLIC src plugins core)

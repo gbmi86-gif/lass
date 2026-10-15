@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../src/url_secure.h"
 #include "plugin_rtmp.h"
 #include "../src/types.h"
 #include "../src/lass_log.h"
@@ -328,7 +329,9 @@ IDM_Result rtmp_download(IDM_PluginHooks *plug,
     }
     CloseHandle(t);
 
-    LOGI("rtmp", "Download started: %s", url);
+    char red_url[256];
+    url_redact_for_log(url, red_url, sizeof(red_url));
+    LOGI("rtmp", "Download started: %s", red_url);
     return IDM_OK;
 }
 

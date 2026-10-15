@@ -15,6 +15,8 @@
 #ifndef IDM_PLUGIN_HTTP_AUTH_H
 #define IDM_PLUGIN_HTTP_AUTH_H
 
+#include <windows.h>
+#include <wininet.h>
 #include "plugin_api.h"
 
 #ifdef __cplusplus

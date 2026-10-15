@@ -17,7 +17,8 @@
 #include "../src/engine.h"
 
 #define QUEUE_PERSIST_MAGIC   0x5141534Cu  /* "LASQ" */
-#define QUEUE_PERSIST_VERSION 1
+#define QUEUE_PERSIST_VERSION_V1 1
+#define QUEUE_PERSIST_VERSION    2   /* ۲: رکورد + رمز رمزشده‌ی FTP */
 
 /* یه رکورد برای هر دانلود — اندازه‌ی ثابت برای سادگی */
 typedef struct {
@@ -35,6 +36,13 @@ typedef struct {
     DWORD    sched_low;      /* FILETIME.dwLowDateTime */
     DWORD    sched_high;     /* FILETIME.dwHighDateTime */
 } QueueRecord;
+
+/* نسخه‌ی ۲: رکورد نسخه‌ی ۱ به‌علاوه‌ی رمز رمزشده با DPAPI (هرگز متن ساده نیست).
+   فایل‌های نسخه‌ی ۱ هم خوانده می‌شوند و رمزی ندارند. */
+typedef struct {
+    QueueRecord base;
+    char        pass_enc[512];
+} QueueRecordV2;
 
 /* ذخیره کل queue به فایل — بعد از هر تغییر (add/remove/complete) صدا زده میشه */
 BOOL queue_persist_save(IDM_Engine *eng, const char *queue_path);

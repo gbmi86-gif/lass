@@ -41,6 +41,9 @@
 #include "lass_log.h"
 #include "shutdown_brake.h"
 #include "../plugins/security_fixes.h"
+#include "transport.h"
+#include "url_secure.h"
+#include "secure_store.h"
 
 /* تخصیص آرایه‌ی اشاره‌گر segment با بررسی overflow */
 static IDM_Segment **alloc_seg_array(uint32_t n) {
@@ -229,7 +232,7 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
         }
 
         HTTP_DiscoveryInfo info;
-        IDM_Result r = http_discover(dl->url, dl->referer, dl, &info);
+        IDM_Result r = dl_discover(dl_conn_url(dl), dl->referer, dl, &info);
 
         EnterCriticalSection(&eng->lock);
 
@@ -718,7 +721,6 @@ static DWORD WINAPI scheduler_thread(LPVOID param) {
 
                 if (all_done_or_failed(dl)) {
                     if (all_completed(dl)) {
-                        dl->state = DL_COMPLETED;
                         eng->active_count--;
                         resume_remove(dl);
                         fw_sync(dl->writer);
@@ -738,6 +740,9 @@ static DWORD WINAPI scheduler_thread(LPVOID param) {
                                     (unsigned long)GetLastError(), dl->temp_path);
                         }
 
+                        /* وضعیت فقط بعد از نهایی شدن فایل منتشر می‌شود: هیچ ناظری
+                           (UI، پلاگین یا کد دیگر) DL_COMPLETED را وقتی فایل هنوز .tels است نمی‌بیند. */
+                        dl->state = DL_COMPLETED;
                         if (eng->notify_hwnd)
                             PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
                                          (WPARAM)dl->id, (LPARAM)DL_COMPLETED);
@@ -858,8 +863,29 @@ IDM_Download *engine_add(IDM_Engine  *eng,
                           uint32_t     max_segments,
                           uint64_t     speed_limit) {
     if (!eng || !url) return NULL;
-    if (!validate_url(url, IDM_MAX_URL)) {
-        LOGW(LOG_MOD_ENGINE, "rejected download URL: only http/https without control characters are accepted");
+
+    /* رمز از URL جدا می‌شود؛ از این‌جا فقط URL پاک‌شده استفاده می‌شود */
+    char clean_url[IDM_MAX_URL];
+    char pass_plain[128] = {0};
+    char enc_pass[512]   = {0};
+    char secret_url[IDM_MAX_URL] = {0};
+    if (!url_split_credentials(url, clean_url, sizeof(clean_url),
+                               pass_plain, sizeof(pass_plain))) {
+        LOGW(LOG_MOD_ENGINE, "rejected download URL: malformed or too long");
+        return NULL;
+    }
+    if (pass_plain[0]) {
+        BOOL protected_ok = secure_store_encrypt(pass_plain, enc_pass, (int)sizeof(enc_pass)) &&
+                            url_inject_password(clean_url, pass_plain, secret_url, sizeof(secret_url));
+        SecureZeroMemory(pass_plain, sizeof(pass_plain));
+        if (!protected_ok) {
+            LOGW(LOG_MOD_ENGINE, "rejected download URL: could not protect its password");
+            return NULL;
+        }
+    }
+    url = clean_url;
+    if (!dl_url_supported(url)) {
+        LOGW(LOG_MOD_ENGINE, "rejected download URL: only http, https and ftp (not ftps) without control characters are accepted");
         return NULL;
     }
 
@@ -876,6 +902,9 @@ IDM_Download *engine_add(IDM_Engine  *eng,
     dl->speed_limit  = speed_limit;
     dl->next         = NULL;
     snprintf(dl->url,      IDM_MAX_URL,  "%s", url);
+    memcpy(dl->pass_enc,   enc_pass,   sizeof(dl->pass_enc));
+    memcpy(dl->secret_url, secret_url, sizeof(dl->secret_url));
+    SecureZeroMemory(secret_url, sizeof(secret_url));
     /* فیکس دفاعی: قبلاً فقط NULL رو به "download.bin" fallback
        می‌داد؛ یه رشته‌ی *خالی* (که هر caller ای از جمله مسیرهایی که
        PathCombineA روشون شکست خورده بود می‌تونست بفرسته) به‌عنوان
@@ -1218,6 +1247,22 @@ void engine_remove(IDM_Engine *eng, uint32_t id) {
 /* ======================================================
    دسترسی امن برای مانیتور و سایر thread های خارج از engine
    ====================================================== */
+/* رمز رمزشده‌ی صف را باز می‌کند و URL اتصال را (فقط در حافظه) می‌سازد */
+BOOL engine_dl_restore_password(IDM_Download *dl, const char *pass_enc) {
+    if (!dl || !pass_enc || !pass_enc[0]) return FALSE;
+    char pass[128]   = {0};
+    char secret[IDM_MAX_URL] = {0};
+    BOOL ok = secure_store_decrypt(pass_enc, pass, (int)sizeof(pass)) &&
+              url_inject_password(dl->url, pass, secret, sizeof(secret));
+    SecureZeroMemory(pass, sizeof(pass));
+    if (ok) {
+        memcpy(dl->secret_url, secret, sizeof(dl->secret_url));
+        snprintf(dl->pass_enc, sizeof(dl->pass_enc), "%s", pass_enc);
+    }
+    SecureZeroMemory(secret, sizeof(secret));
+    return ok;
+}
+
 IDM_Download *engine_dl_acquire(IDM_Engine *eng, uint32_t id) {
     if (!eng) return NULL;
     EnterCriticalSection(&eng->lock);

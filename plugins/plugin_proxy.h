@@ -16,6 +16,8 @@
 #ifndef IDM_PLUGIN_PROXY_H
 #define IDM_PLUGIN_PROXY_H
 
+#include <windows.h>
+#include <wininet.h>
 #include "plugin_api.h"
 
 #ifdef __cplusplus

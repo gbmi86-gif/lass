@@ -25,6 +25,7 @@
 #include <string.h>
 #include <stdarg.h>
 
+#include "../src/url_secure.h"
 #include "plugin_browser_ext.h"
 #include "../src/shutdown_brake.h"
 #include "../src/lass_log.h"
@@ -188,7 +189,9 @@ static DWORD WINAPI client_thread(LPVOID param) {
         }
         buf[msg_len] = '\0';
 
-        ext_log("[BrowserExt] received: %.200s\n", buf);
+        char red_buf[2048];
+        url_redact_for_log(buf, red_buf, sizeof(red_buf));
+        ext_log("[BrowserExt] received: %.200s\n", red_buf);
         InterlockedIncrement(&priv->messages_received);
 
         /* parse action */

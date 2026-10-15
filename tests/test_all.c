@@ -58,6 +58,10 @@
 #include "../plugins/plugins_setup.h"
 #include "../src/crash_report.h"
 #include "../src/legacy_data.h"
+#include "../src/transport.h"
+#include "../src/url_secure.h"
+#include "../plugins/plugin_ftp.h"
+#include "test_ftpd.h"
 #include "../src/queue_persist.h"
 #include "../src/settings.h"
 #include "../src/i18n.h"
@@ -1039,7 +1043,7 @@ static void test_engine_features(void) {
         "ftp://files.example.com/data.tar.gz\n";
 
     int added = engine_add_batch(eng, batch_urls, NULL, 4, 0, "TestGroup");
-    TEST("batch: 3 valid http links accepted (empty/invalid/ftp rejected)", added == 3);
+    TEST("batch: 3 http + 1 ftp accepted (empty and invalid lines skipped)", added == 4);
 
     /* بررسی group_id یکسان */
     EnterCriticalSection(&eng->lock);
@@ -1050,7 +1054,7 @@ static void test_engine_features(void) {
         if (dl->group_id == gid) same_group++;
     }
     LeaveCriticalSection(&eng->lock);
-    TEST("all accepted links in same group", same_group == 3);
+    TEST("all accepted links in same group", same_group == 4);
     TEST("group_id not zero",     gid != 0);
 
     /* بررسی group_name */
@@ -1078,7 +1082,7 @@ static void test_engine_features(void) {
     int remaining = 0;
     for (IDM_Download *dl = eng->queue_head; dl; dl = dl->next) remaining++;
     LeaveCriticalSection(&eng->lock);
-    TEST("remaining count ok",    remaining == 1);
+    TEST("remaining count ok",    remaining == 2);
 
     /* ── engine_schedule ── */
     EnterCriticalSection(&eng->lock);
@@ -1550,8 +1554,8 @@ static void test_dl_lifecycle(void) {
     TEST("engine create", eng != NULL);
     if (!eng) return;
 
-    TEST("ftp link is rejected at engine level",
-         engine_add(eng, "ftp://files.example.com/x.zip", "", 1, 0) == NULL);
+    TEST("ftps link is rejected at engine level", engine_add(eng, "ftps://127.0.0.1:1/x.zip", "", 1, 0) == NULL);
+    TEST("ftp link is accepted at engine level", engine_add(eng, "ftp://127.0.0.1:1/x.zip", "", 1, 0) != NULL);
 
     IDM_Download *upper = engine_add(eng, "HTTP://127.0.0.1:1/upper.zip", "", 1, 0);
     TEST("uppercase http scheme is accepted", upper != NULL);
@@ -1576,6 +1580,180 @@ static void test_dl_lifecycle(void) {
     TEST("last release completes the deferred removal", TRUE);
     engine_destroy(eng);
     TEST("engine destroy after lifecycle test", TRUE);
+}
+
+/* ======================================================
+   تست: FTP مستقل — URL، SIZE/REST، بازه‌ی شامل، و دانلود کامل با engine
+   ====================================================== */
+static void test_ftp_download(void) {
+    SECTION("FTP: independent client, ranged read and full download");
+    const uint16_t FTP_PORT = 58761;
+    const uint64_t FSIZE = 3u * 1024u * 1024u;
+    bool srv_ok = test_ftpd_start(FTP_PORT, FSIZE);
+    TEST("ftp test server started", srv_ok);
+    if (!srv_ok) return;
+
+    char url[160];
+    snprintf(url, sizeof(url), "ftp://127.0.0.1:%u/file.bin", (unsigned)FTP_PORT);
+    TEST("ftp url recognised", ftp_is_ftp_url(url));
+    TEST("ftp url supported", dl_url_supported(url));
+    TEST("ftps url not supported", !dl_url_supported("ftps://127.0.0.1/file.bin"));
+
+    uint64_t size = 0;
+    BOOL ranges = FALSE;
+    char fn[IDM_MAX_FILENAME] = {0};
+    IDM_Result r = ftp_discover(url, &size, fn, sizeof(fn), &ranges);
+    TEST("discover succeeds", r == IDM_OK);
+    TEST("discover reports the file size", size == FSIZE);
+    TEST("discover reports the file name", strcmp(fn, "file.bin") == 0);
+    TEST("discover detects REST support", ranges == TRUE);
+
+    FtpStream *st = ftp_range_open(url, 1000, 1000 + 4095);
+    TEST("ranged open (REST) succeeds", st != NULL);
+    if (st) {
+        static uint8_t rb[4096];
+        int got = 0, n = 0;
+        while (got < (int)sizeof(rb) && (n = ftp_range_read(st, rb + got, (int)sizeof(rb) - got)) > 0)
+            got += n;
+        TEST("ranged read returns exactly 4096 bytes", got == 4096);
+        bool exact = (got == 4096);
+        for (int i = 0; exact && i < got; i++)
+            if (rb[i] != test_ftpd_byte(1000 + (uint64_t)i)) exact = false;
+        TEST("ranged read bytes match the file at that offset", exact);
+        TEST("server honoured the resume request", ftp_range_got_partial(st));
+        ftp_range_close(st);
+    }
+
+    IDM_Engine *eng = engine_create(NULL);
+    TEST("engine create for ftp download", eng != NULL);
+    IDM_Download *dl = eng ? engine_add(eng, url, "ftp_test_out.bin", 4, 0) : NULL;
+    TEST("ftp download added", dl != NULL);
+    bool done = false;
+    if (dl) {
+        DWORD t0 = GetTickCount();
+        while (GetTickCount() - t0 < 30000) {
+            if (dl->state == DL_COMPLETED) { done = true; break; }
+            if (dl->state == DL_FAILED) break;
+            Sleep(50);
+        }
+    }
+    TEST("ftp download completes", done);
+
+    bool content_ok = false;
+    if (done) {
+        FILE *f = fopen("ftp_test_out.bin", "rb");
+        if (f) {
+            static uint8_t cb[65536];
+            uint64_t pos = 0;
+            bool ok = true;
+            size_t cnt = 0;
+            while ((cnt = fread(cb, 1, sizeof(cb), f)) > 0) {
+                for (size_t i = 0; i < cnt; i++)
+                    if (cb[i] != test_ftpd_byte(pos + (uint64_t)i)) { ok = false; break; }
+                if (!ok) break;
+                pos += (uint64_t)cnt;
+            }
+            fclose(f);
+            content_ok = ok && pos == FSIZE;
+        }
+    }
+    TEST("downloaded file is byte-identical to the server file", content_ok);
+
+    if (eng) engine_destroy(eng);
+    test_ftpd_stop();
+    DeleteFileA("ftp_test_out.bin");
+}
+
+/* ======================================================
+   تست: رمز FTP — جداسازی از URL، پوشاندن در لاگ، صف رمزشده و سازگاری با صف نسخه‌ی ۱
+   ====================================================== */
+static BOOL bytes_contain(const char *data, size_t n, const char *needle) {
+    size_t m = strlen(needle);
+    if (m == 0 || n < m) return FALSE;
+    for (size_t i = 0; i + m <= n; i++)
+        if (memcmp(data + i, needle, m) == 0) return TRUE;
+    return FALSE;
+}
+
+static void test_url_credentials(void) {
+    SECTION("URL credentials: split, redact, protected queue and version 1 compatibility");
+    char clean[IDM_MAX_URL] = {0};
+    char pass[128] = {0};
+    BOOL ok = url_split_credentials("ftp://alice:s3cret@127.0.0.1:21/a.bin", clean, sizeof(clean), pass, sizeof(pass));
+    TEST("split succeeds on a URL with credentials", ok);
+    TEST("split removes the password from the URL", strcmp(clean, "ftp://alice@127.0.0.1:21/a.bin") == 0);
+    TEST("split returns the password separately", strcmp(pass, "s3cret") == 0);
+
+    ok = url_split_credentials("http://example.com/x.zip", clean, sizeof(clean), pass, sizeof(pass));
+    TEST("URL without password is unchanged", ok && strcmp(clean, "http://example.com/x.zip") == 0 && pass[0] == '\0');
+
+    char full[IDM_MAX_URL] = {0};
+    TEST("inject rebuilds the authenticated URL",
+         url_inject_password("ftp://alice@127.0.0.1:21/a.bin", "s3cret", full, sizeof(full)) &&
+         strcmp(full, "ftp://alice:s3cret@127.0.0.1:21/a.bin") == 0);
+
+    char red[512] = {0};
+    url_redact_for_log("ftp://alice:s3cret@127.0.0.1:21/a.bin", red, sizeof(red));
+    TEST("log redaction hides the password", strstr(red, "s3cret") == NULL && strstr(red, "alice:***@") != NULL);
+    url_redact_for_log("{\"action\":\"download\",\"url\":\"ftp://bob:hunter2@h/x\"}", red, sizeof(red));
+    TEST("log redaction works inside JSON text", strstr(red, "hunter2") == NULL && strstr(red, "bob:***@h") != NULL);
+
+    IDM_Engine *eng = engine_create(NULL);
+    IDM_Download *dl = eng ? engine_add(eng, "ftp://alice:s3cret@127.0.0.1:1/q.bin", "q_cred_test.bin", 1, 0) : NULL;
+    TEST("ftp URL with credentials is accepted", dl != NULL);
+    if (dl) {
+        TEST("stored download URL has no password", strstr(dl->url, "s3cret") == NULL);
+        TEST("connection URL keeps the password in memory", strstr(dl->secret_url, "s3cret") != NULL);
+        TEST("password is held only in encrypted form", dl->pass_enc[0] != '\0' && strstr(dl->pass_enc, "s3cret") == NULL);
+    }
+
+    const char *qpath = "queue_cred_test.dat";
+    TEST("queue saved", eng && queue_persist_save(eng, qpath));
+    {
+        static char qb[1 << 16];
+        FILE *f = fopen(qpath, "rb");
+        size_t n = f ? fread(qb, 1, sizeof(qb), f) : 0;
+        if (f) fclose(f);
+        TEST("queue file contains no plain password", n > 0 && !bytes_contain(qb, n, "s3cret"));
+        TEST("queue file contains no password in URL form", !bytes_contain(qb, n, "alice:s3cret"));
+    }
+
+    IDM_Engine *eng2 = engine_create(NULL);
+    TEST("queue restored into a new engine", eng2 && queue_persist_load(eng2, qpath));
+    IDM_Download *rdl = (eng2 && eng2->queue_head) ? eng2->queue_head : NULL;
+    TEST("restored download gets its connection password back", rdl && strstr(rdl->secret_url, "s3cret") != NULL);
+    TEST("restored download URL stays password-free", rdl && strstr(rdl->url, "s3cret") == NULL);
+
+    /* صف نسخه‌ی ۱ (بدون فیلد رمز) باید همچنان خوانده شود */
+    const char *v1path = "queue_v1_test.dat";
+    {
+        typedef struct { uint32_t magic; uint16_t version; uint16_t pad; uint32_t count; uint32_t pad2; } V1Hdr;
+        V1Hdr h = { QUEUE_PERSIST_MAGIC, (uint16_t)QUEUE_PERSIST_VERSION_V1, 0, 1, 0 };
+        QueueRecord rec;
+        memset(&rec, 0, sizeof(rec));
+        snprintf(rec.url, sizeof(rec.url), "%s", "http://127.0.0.1:1/v1.bin");
+        snprintf(rec.out_path, sizeof(rec.out_path), "%s", "v1_test.bin");
+        rec.state = DL_PAUSED;
+        rec.num_segments = 1;
+        FILE *f = fopen(v1path, "wb");
+        if (f) {
+            fwrite(&h, sizeof(h), 1, f);
+            fwrite(&rec, sizeof(rec), 1, f);
+            fclose(f);
+        }
+    }
+    IDM_Engine *eng3 = engine_create(NULL);
+    TEST("version 1 queue file loads", eng3 && queue_persist_load(eng3, v1path));
+    TEST("version 1 record restores its URL",
+         eng3 && eng3->queue_head && strcmp(eng3->queue_head->url, "http://127.0.0.1:1/v1.bin") == 0);
+
+    if (eng) engine_destroy(eng);
+    if (eng2) engine_destroy(eng2);
+    if (eng3) engine_destroy(eng3);
+    DeleteFileA(qpath);
+    DeleteFileA(v1path);
+    DeleteFileA("q_cred_test.bin");
+    DeleteFileA("v1_test.bin");
 }
 
 static void test_crash_report(void) {
@@ -3126,6 +3304,8 @@ int main(void) {
     test_crash_report();
     test_legacy_migration();
     test_dl_lifecycle();
+    test_ftp_download();
+    test_url_credentials();
     test_launch_retry_backoff();
     test_permanent_vs_transient_errors();
     test_http_extract_host();

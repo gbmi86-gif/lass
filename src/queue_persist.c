@@ -52,7 +52,7 @@ BOOL queue_persist_save(IDM_Engine *eng, const char *queue_path) {
     for (IDM_Download *dl = eng->queue_head; dl; dl = dl->next)
         count++;
 
-    QueueRecord *records = (QueueRecord *)calloc(count, sizeof(QueueRecord));
+    QueueRecordV2 *records = (QueueRecordV2 *)calloc(count, sizeof(QueueRecordV2));
     if (!records && count > 0) {
         LeaveCriticalSection(&eng->lock);
         return FALSE;
@@ -60,7 +60,7 @@ BOOL queue_persist_save(IDM_Engine *eng, const char *queue_path) {
 
     uint32_t i = 0;
     for (IDM_Download *dl = eng->queue_head; dl; dl = dl->next, i++) {
-        QueueRecord *r = &records[i];
+        QueueRecord *r = &records[i].base;
         r->id           = dl->id;
         r->total_size   = dl->total_size;
         r->downloaded   = (uint64_t)dl->downloaded;
@@ -74,6 +74,7 @@ BOOL queue_persist_save(IDM_Engine *eng, const char *queue_path) {
         strncpy(r->out_path,   dl->out_path,   IDM_MAX_PATH     - 1);
         strncpy(r->filename,   dl->filename,   IDM_MAX_FILENAME - 1);
         strncpy(r->group_name, dl->group_name, 63);
+        strncpy(records[i].pass_enc, dl->pass_enc, sizeof(records[i].pass_enc) - 1);
     }
 
     LeaveCriticalSection(&eng->lock);
@@ -103,7 +104,7 @@ BOOL queue_persist_save(IDM_Engine *eng, const char *queue_path) {
     DWORD written;
     BOOL ok = WriteFile(hf, &hdr, sizeof(hdr), &written, NULL);
     if (ok && count > 0)
-        ok = WriteFile(hf, records, count * sizeof(QueueRecord), &written, NULL);
+        ok = WriteFile(hf, records, count * sizeof(QueueRecordV2), &written, NULL);
 
     FlushFileBuffers(hf);
     CloseHandle(hf);
@@ -132,28 +133,41 @@ BOOL queue_persist_load(IDM_Engine *eng, const char *queue_path) {
     if (!ReadFile(hf, &hdr, sizeof(hdr), &read_bytes, NULL) ||
         read_bytes != sizeof(hdr) ||
         hdr.magic   != QUEUE_PERSIST_MAGIC ||
-        hdr.version != QUEUE_PERSIST_VERSION ||
+        (hdr.version != QUEUE_PERSIST_VERSION && hdr.version != QUEUE_PERSIST_VERSION_V1) ||
         hdr.count   == 0 ||
         hdr.count   > 10000) { /* sanity check */
         CloseHandle(hf);
         return FALSE;
     }
 
-    QueueRecord *records = (QueueRecord *)calloc(hdr.count, sizeof(QueueRecord));
+    /* نسخه‌ی ۱ رکورد بدون رمز دارد؛ همه به QueueRecordV2 تبدیل می‌شوند */
+    QueueRecordV2 *records = (QueueRecordV2 *)calloc(hdr.count, sizeof(QueueRecordV2));
     if (!records) { CloseHandle(hf); return FALSE; }
 
-    BOOL ok = ReadFile(hf, records, hdr.count * sizeof(QueueRecord),
-                       &read_bytes, NULL);
+    BOOL ok = FALSE;
+    if (hdr.version == QUEUE_PERSIST_VERSION_V1) {
+        DWORD want = (DWORD)(hdr.count * sizeof(QueueRecord));
+        QueueRecord *old = (QueueRecord *)calloc(hdr.count, sizeof(QueueRecord));
+        ok = old && ReadFile(hf, old, want, &read_bytes, NULL) && read_bytes == want;
+        if (ok) {
+            for (uint32_t k = 0; k < hdr.count; k++) records[k].base = old[k];
+        }
+        free(old);
+    } else {
+        DWORD want = (DWORD)(hdr.count * sizeof(QueueRecordV2));
+        ok = ReadFile(hf, records, want, &read_bytes, NULL) && read_bytes == want;
+    }
     CloseHandle(hf);
 
-    if (!ok || read_bytes != hdr.count * sizeof(QueueRecord)) {
+    if (!ok) {
         free(records);
         return FALSE;
     }
 
     uint32_t loaded = 0;
     for (uint32_t i = 0; i < hdr.count; i++) {
-        QueueRecord *r = &records[i];
+        QueueRecordV2 *rv = &records[i];
+        QueueRecord *r = &rv->base;
 
         /* فقط دانلودهایی رو بازیابی کن که منطقی هستن:
            - URL معتبر داشته باشن
@@ -188,6 +202,7 @@ BOOL queue_persist_load(IDM_Engine *eng, const char *queue_path) {
         IDM_Download *dl = engine_add(eng, r->url, r->out_path,
                                        r->num_segments ? r->num_segments : 8, 0);
         if (!dl) continue;
+        if (rv->pass_enc[0]) engine_dl_restore_password(dl, rv->pass_enc);
 
         /* آپدیت فیلدهای اضافی — state رو بعد از add تنظیم کن
            چون engine_add state رو DL_QUEUED می‌کنه.

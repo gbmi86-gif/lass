@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "transport.h"
 #include "segment.h"
 #include "http.h"
 #include "storage.h"
@@ -50,7 +51,7 @@ static DWORD WINAPI seg_worker(LPVOID param) {
 
 retry:
     /* Respect speed limit: checked per-chunk in the read loop */
-    HTTP_Conn *conn = http_open_range(dl->url, dl->referer, dl, seg->current, seg->end);
+    DlStream *conn = dl_stream_open_range(dl, seg->current, seg->end);
     if (!conn) {
         /* Back-off and retry */
         EnterCriticalSection(&seg->lock);
@@ -81,8 +82,8 @@ retry:
        داده اجازه بدیم در آفست seg->current نوشته بشه، فایل خراب
        می‌شه (این دقیقاً علت اصلی ZIPهای damaged بود). باید fail
        کنیم تا engine کل دانلود رو با یه segment تنها retry کنه. */
-    if (seg->start > 0 && !http_conn_got_partial(conn)) {
-        http_close(conn);
+    if (seg->start > 0 && !dl_stream_got_partial(conn)) {
+        dl_stream_close(conn);
         EnterCriticalSection(&seg->lock);
         seg->state = SEG_FAILED;
         LeaveCriticalSection(&seg->lock);
@@ -101,7 +102,7 @@ retry:
 
     uint8_t *buf = (uint8_t *)malloc(SEG_BUF_SIZE);
     if (!buf) {
-        http_close(conn);
+        dl_stream_close(conn);
         EnterCriticalSection(&seg->lock);
         seg->state = SEG_FAILED;
         LeaveCriticalSection(&seg->lock);
@@ -112,10 +113,10 @@ retry:
         /* Check if we're done with this segment range */
         if (seg->end > 0 && seg->current > seg->end) break;
 
-        int n = http_read(conn, buf, SEG_BUF_SIZE);
+        int n = dl_stream_read(conn, buf, SEG_BUF_SIZE);
         if (n == 0) break;          /* EOF */
         if (n < 0)  {               /* error – یا timeout بعد از Pause، یا شکست واقعی شبکه */
-            http_close(conn);
+            dl_stream_close(conn);
             free(buf);
             if (seg->cancel_flag) {
                 /* این خطا احتمالاً نتیجه‌ی همون receive-timeout کوتاهیه
@@ -148,7 +149,7 @@ retry:
 
         /* Write to file */
         if (fw_write(dl->writer, seg->current, buf, (size_t)n) != 0) {
-            http_close(conn);
+            dl_stream_close(conn);
             free(buf);
             EnterCriticalSection(&seg->lock);
             seg->state = SEG_FAILED;
@@ -193,7 +194,7 @@ retry:
     }
 
     free(buf);
-    http_close(conn);
+    dl_stream_close(conn);
 
     EnterCriticalSection(&seg->lock);
     if (seg->cancel_flag) {

@@ -75,6 +75,10 @@ struct IDM_Download {
        خواسته شده ولی تخریب به آخرین صاحب busy سپرده شده. */
     uint32_t         busy;
     bool             remove_pending;
+    /* رمز FTP: فقط در حافظه (secret_url) و به‌صورت رمزشده با DPAPI (pass_enc).
+       هرگز به‌صورت متن ساده در صف یا لاگ نمی‌آید. */
+    char             secret_url[IDM_MAX_URL];
+    char             pass_enc[512];
 
     /* validator های فایل روی سرور (از HEAD اولیه) — برای If-Range
        موقع ادامه‌ی دانلود: به‌جای اینکه کورکورانه فرض کنیم فایل
@@ -166,6 +170,8 @@ IDM_Download *engine_dl_acquire(IDM_Engine *eng, uint32_t id);
 /* busy را پایین می‌آورد؛ اگر حذف معلق باشد و صاحب دیگری نماند، تخریب را انجام می‌دهد.
    بعد از این فراخوانی dl ممکن است دیگر معتبر نباشد. */
 void          engine_dl_release(IDM_Engine *eng, IDM_Download *dl);
+/* رمز رمزشده‌ی صف را برمی‌گرداند و secret_url را برای اتصال می‌سازد */
+BOOL engine_dl_restore_password(IDM_Download *dl, const char *pass_enc);
 
 /* گزارش یه stall واقعی (بعد از عبور از stall_timeout_sec، نه یه
    خوندن لحظه‌ای) روی یه host مشخص — dynamic_seg این رو موقع

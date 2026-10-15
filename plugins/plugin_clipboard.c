@@ -22,6 +22,7 @@
 #include <string.h>
 #include <ctype.h>
 
+#include "../src/url_secure.h"
 #include "plugin_clipboard.h"
 #include "../src/lass_log.h"
 #include "../src/types.h"
@@ -148,7 +149,9 @@ static void cb_process_clipboard(CB_Priv *p) {
 
     if (is_duplicate) return;
 
-    LOGI(LOG_MOD_CLIPBOARD, "URL detected: %.80s...", url_ansi);
+    char red_url[256];
+    url_redact_for_log(url_ansi, red_url, sizeof(red_url));
+    LOGI(LOG_MOD_CLIPBOARD, "URL detected: %.80s...", red_url);
 
     /* callback به GUI */
     if (p->on_url)

@@ -24,6 +24,7 @@
 #include <string.h>
 #include <math.h>
 
+#include "../src/url_secure.h"
 #include "plugin_basket.h"
 #include "../src/lass_log.h"
 
@@ -177,7 +178,9 @@ static HRESULT STDMETHODCALLTYPE bk_dt_Drop(
         if (self->priv->on_drop)
             self->priv->on_drop(url, self->priv->userdata);
         *pdwEffect = DROPEFFECT_COPY;
-        LOGI(LOG_MOD_BASKET, "dropped URL: %.60s", url);
+        char red_url[256];
+        url_redact_for_log(url, red_url, sizeof(red_url));
+        LOGI(LOG_MOD_BASKET, "dropped URL: %.60s", red_url);
     }
 
     InvalidateRect(self->priv->hwnd, NULL, FALSE);
