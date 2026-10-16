@@ -23,6 +23,7 @@ set(SRC_FILES
     src/legacy_data.c
     src/transport.c
     src/url_secure.c
+    src/tels_container.c
     src/i18n.c)
 
 set(PLUGIN_FILES

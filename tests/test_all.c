@@ -60,6 +60,7 @@
 #include "../src/legacy_data.h"
 #include "../src/transport.h"
 #include "../src/url_secure.h"
+#include "../src/tels_container.h"
 #include "../plugins/plugin_ftp.h"
 #include "test_ftpd.h"
 #include "../src/queue_persist.h"
@@ -1756,6 +1757,348 @@ static void test_url_credentials(void) {
     DeleteFileA("v1_test.bin");
 }
 
+/* ======================================================
+   تست: کانتینر .tels — سیستم فایل مجازی، commit، بازیابی و همروندی
+   ====================================================== */
+static uint64_t tels_le64(const uint8_t *p) {
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; i--) v = (v << 8) | p[i];
+    return v;
+}
+
+static BOOL tels_make_sample(const char *path, TelsId *afile_out, TelsId *docs_out) {
+    DeleteFileA(path);
+    TelsContainer *c = tels_open(path, TRUE);
+    if (!c) return FALSE;
+    TelsId docs = 0, afile = 0;
+    BOOL ok = tels_create(c, TELS_ROOT, "docs", TELS_TYPE_DIR, &docs) &&
+              tels_create(c, docs, "a.txt", TELS_TYPE_FILE, &afile) &&
+              tels_write(c, afile, 0, "hello", 5) &&
+              tels_commit(c);
+    tels_close(c);
+    if (afile_out) *afile_out = afile;
+    if (docs_out) *docs_out = docs;
+    return ok;
+}
+
+typedef struct { TelsContainer *c; TelsId id; int t; } TelsWriterArg;
+
+static DWORD WINAPI tels_writer_proc(LPVOID p) {
+    TelsWriterArg *a = (TelsWriterArg *)p;
+    uint8_t blk[512];
+    memset(blk, (int)('A' + a->t), sizeof(blk));
+    for (int i = 0; i < 200; i++) {
+        uint64_t off = (uint64_t)(i * 4 + a->t) * 512u;
+        tels_write(a->c, a->id, off, blk, sizeof(blk));
+    }
+    return 0;
+}
+
+static void test_tels_container(void) {
+    SECTION("Container .tels: virtual filesystem, commit and recovery");
+    const char *P = "tels_test_main.tels";
+    DeleteFileA(P);
+    TEST("missing container is not opened without create", tels_open("tels_test_absent.tels", FALSE) == NULL);
+    TelsContainer *c = tels_open(P, TRUE);
+    TEST("container created", c != NULL);
+    if (!c) return;
+
+    TelsId docs = 0, afile = 0;
+    TEST("directory created at the root", tels_create(c, TELS_ROOT, "docs", TELS_TYPE_DIR, &docs));
+    TEST("file created inside a directory", tels_create(c, docs, "a.txt", TELS_TYPE_FILE, &afile));
+    TEST("duplicate name in one directory is rejected (case-insensitive)",
+         !tels_create(c, docs, "A.TXT", TELS_TYPE_FILE, NULL));
+    TEST("write hello", tels_write(c, afile, 0, "hello", 5));
+    char rb[64] = {0};
+    TEST("read back hello", tels_read(c, afile, 0, rb, 5) == 5 && memcmp(rb, "hello", 5) == 0);
+    uint64_t sz = 0;
+    TEST("file size is 5", tels_size(c, afile, &sz) && sz == 5);
+    TelsId found = 0;
+    TEST("lookup finds the file by name", tels_lookup(c, docs, "a.txt", &found) && found == afile);
+    TEST("a file cannot contain another entry", !tels_create(c, afile, "x", TELS_TYPE_FILE, NULL));
+
+    TelsId s = 0;
+    tels_create(c, TELS_ROOT, "sparse.bin", TELS_TYPE_FILE, &s);
+    TEST("write at a later offset first", tels_write(c, s, 10, "world", 5));
+    TEST("then write at offset 0", tels_write(c, s, 0, "hello", 5));
+    char sb[32] = {0};
+    TEST("out-of-order writes read back with a zero gap",
+         tels_read(c, s, 0, sb, 15) == 15 && memcmp(sb, "hello\0\0\0\0\0world", 15) == 0);
+    TEST("read at the end returns 0", tels_read(c, s, 15, sb, 4) == 0);
+    TEST("read across the end returns the available bytes",
+         tels_read(c, s, 12, sb, 10) == 3 && memcmp(sb, "rld", 3) == 0);
+    TEST("overwrite inside an existing extent", tels_write(c, s, 2, "XYZ", 3));
+    char ob[16] = {0};
+    TEST("overwritten content reads back correctly",
+         tels_read(c, s, 0, ob, 15) == 15 && memcmp(ob, "heXYZ\0\0\0\0\0world", 15) == 0);
+
+    TelsId cur = TELS_ROOT, deep = 0;
+    BOOL nest_ok = TRUE;
+    for (int i = 1; i <= 16; i++) {
+        char nm[16];
+        snprintf(nm, sizeof(nm), "d%d", i);
+        TelsId nx = 0;
+        if (!tels_create(c, cur, nm, TELS_TYPE_DIR, &nx)) { nest_ok = FALSE; break; }
+        cur = nx;
+    }
+    TEST("nesting 16 containers deep succeeds", nest_ok);
+    TEST("the 17th nested container is rejected", !tels_create(c, cur, "too_deep", TELS_TYPE_DIR, NULL));
+    TEST("resolve creates a nested path", tels_resolve(c, "x/y/z", TRUE, &deep) && deep != 0);
+    TelsId got = 0;
+    TEST("resolve finds the same nested path again", tels_resolve(c, "x/y/z", FALSE, &got) && got == deep);
+
+    TEST("empty name is rejected", !tels_create(c, TELS_ROOT, "", TELS_TYPE_FILE, NULL));
+    TEST("name with a separator is rejected", !tels_create(c, TELS_ROOT, "a/b", TELS_TYPE_FILE, NULL));
+    TEST("name with a colon is rejected", !tels_create(c, TELS_ROOT, "a:b", TELS_TYPE_FILE, NULL));
+    TEST("'..' is rejected", !tels_create(c, TELS_ROOT, "..", TELS_TYPE_FILE, NULL));
+    char longname[300];
+    memset(longname, 'n', sizeof(longname) - 1);
+    longname[sizeof(longname) - 1] = '\0';
+    TEST("name longer than the limit is rejected", !tels_create(c, TELS_ROOT, longname, TELS_TYPE_FILE, NULL));
+
+    TelsId kids[32];
+    TEST("list shows the file inside docs",
+         tels_list(c, docs, kids, 32) == 1 && kids[0] == afile);
+
+    TEST("commit succeeds", tels_commit(c));
+    tels_close(c);
+
+    c = tels_open(P, FALSE);
+    TEST("reopen after a clean close", c != NULL);
+    if (c) {
+        TelsId f2 = 0;
+        TEST("file found after reopen", tels_lookup(c, docs, "a.txt", &f2) && f2 == afile);
+        char rb2[16] = {0};
+        TEST("content survives reopen", tels_read(c, afile, 0, rb2, 5) == 5 && memcmp(rb2, "hello", 5) == 0);
+        char sb2[32] = {0};
+        TEST("sparse content survives reopen",
+             tels_read(c, s, 0, sb2, 15) == 15 && memcmp(sb2, "heXYZ\0\0\0\0\0world", 15) == 0);
+        TelsId got2 = 0;
+        TEST("nested path survives reopen", tels_resolve(c, "x/y/z", FALSE, &got2) && got2 == deep);
+    }
+
+    TelsId post = 0;
+    TEST("file created after the commit", c && tels_create(c, docs, "after.txt", TELS_TYPE_FILE, &post));
+    TEST("data written after the commit", c && tels_write(c, post, 0, "unsaved", 7));
+    tels_abort(c);
+    c = tels_open(P, FALSE);
+    TEST("reopen after an abort without commit", c != NULL);
+    if (c) {
+        TelsId p2 = 0;
+        char pb[16] = {0};
+        TEST("complete records written after the last commit are recovered",
+             tels_lookup(c, docs, "after.txt", &p2) && tels_read(c, p2, 0, pb, 7) == 7 &&
+             memcmp(pb, "unsaved", 7) == 0);
+        TEST("commit before the torn-write test", tels_commit(c));
+        TelsId tf = 0;
+        tels_create(c, docs, "torn.txt", TELS_TYPE_FILE, &tf);
+        tels_write(c, tf, 0, "0123456789ABCDEF", 16);
+        tels_abort(c);
+    }
+    {
+        HANDLE hf = CreateFileA(P, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (hf != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER sz2, cut;
+            GetFileSizeEx(hf, &sz2);
+            cut.QuadPart = sz2.QuadPart - 8;
+            SetFilePointerEx(hf, cut, NULL, FILE_BEGIN);
+            SetEndOfFile(hf);
+            CloseHandle(hf);
+        }
+    }
+    c = tels_open(P, FALSE);
+    TEST("reopen after a torn tail", c != NULL);
+    if (c) {
+        TelsId t2 = 0;
+        uint64_t tsz = 99;
+        TEST("the torn record is dropped: the file exists and is empty",
+             tels_lookup(c, docs, "torn.txt", &t2) && tels_size(c, t2, &tsz) && tsz == 0);
+        TelsId a2 = 0;
+        char ab[8] = {0};
+        TEST("data before the torn record survives",
+             tels_lookup(c, docs, "after.txt", &a2) && tels_read(c, a2, 0, ab, 7) == 7 && memcmp(ab, "unsaved", 7) == 0);
+        TEST("writes work after recovery", tels_write(c, t2, 0, "ok", 2));
+        tels_close(c);
+    }
+
+    /* superblock جدیدتر خراب: باید superblock قبلی و replay کافی باشد */
+    const char *P2 = "tels_test_sb.tels";
+    TelsId a3 = 0, d3 = 0;
+    TEST("sample container for superblock damage", tels_make_sample(P2, &a3, &d3));
+    c = tels_open(P2, FALSE);
+    if (c) {
+        TEST("commit again so two superblocks hold different generations", tels_commit(c));
+        tels_abort(c);
+    }
+    {
+        HANDLE hf = CreateFileA(P2, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (hf != INVALID_HANDLE_VALUE) {
+            uint8_t sa[16], sbb[16];
+            DWORD got_a = 0, got_b = 0;
+            SetFilePointer(hf, 0, NULL, FILE_BEGIN);
+            ReadFile(hf, sa, sizeof(sa), &got_a, NULL);
+            SetFilePointer(hf, 4096, NULL, FILE_BEGIN);
+            ReadFile(hf, sbb, sizeof(sbb), &got_b, NULL);
+            DWORD victim = (tels_le64(sa + 12) > tels_le64(sbb + 12)) ? 0 : 4096;
+            uint8_t junk = 0xFF;
+            SetFilePointer(hf, victim + 13, NULL, FILE_BEGIN);
+            WriteFile(hf, &junk, 1, &got_a, NULL);
+            CloseHandle(hf);
+        }
+    }
+    c = tels_open(P2, FALSE);
+    TEST("container opens with the newest superblock damaged", c != NULL);
+    if (c) {
+        char hb[8] = {0};
+        TelsId f3 = 0;
+        TEST("content survives a damaged newest superblock",
+             tels_lookup(c, d3, "a.txt", &f3) && tels_read(c, f3, 0, hb, 5) == 5 && memcmp(hb, "hello", 5) == 0);
+        tels_close(c);
+    }
+
+    /* index خراب: replay کامل از ابتدا باید همه‌ی داده‌ها را بازسازی کند */
+    const char *P3 = "tels_test_idx.tels";
+    TelsId a4 = 0, d4 = 0;
+    TEST("sample container for index damage", tels_make_sample(P3, &a4, &d4));
+    {
+        HANDLE hf = CreateFileA(P3, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (hf != INVALID_HANDLE_VALUE) {
+            uint8_t sa[32], sbb[32];
+            DWORD got = 0;
+            SetFilePointer(hf, 0, NULL, FILE_BEGIN);
+            ReadFile(hf, sa, sizeof(sa), &got, NULL);
+            SetFilePointer(hf, 4096, NULL, FILE_BEGIN);
+            ReadFile(hf, sbb, sizeof(sbb), &got, NULL);
+            BOOL a_newer = tels_le64(sa + 12) > tels_le64(sbb + 12);
+            uint64_t idx_pos = a_newer ? tels_le64(sa + 20) : tels_le64(sbb + 20);
+            uint8_t junk = 0xAA;
+            SetFilePointer(hf, (LONG)(idx_pos + 56), NULL, FILE_BEGIN);
+            WriteFile(hf, &junk, 1, &got, NULL);
+            CloseHandle(hf);
+        }
+    }
+    c = tels_open(P3, FALSE);
+    TEST("container opens with a damaged index record", c != NULL);
+    if (c) {
+        char hb2[8] = {0};
+        TelsId f4 = 0;
+        TEST("replay from the start restores the content",
+             tels_lookup(c, d4, "a.txt", &f4) && tels_read(c, f4, 0, hb2, 5) == 5 && memcmp(hb2, "hello", 5) == 0);
+        tels_close(c);
+    }
+
+    /* هر دو superblock خراب: replay از ابتدا */
+    const char *P4 = "tels_test_both.tels";
+    TelsId a5 = 0, d5 = 0;
+    TEST("sample container for double superblock damage", tels_make_sample(P4, &a5, &d5));
+    {
+        HANDLE hf = CreateFileA(P4, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (hf != INVALID_HANDLE_VALUE) {
+            uint8_t junk[8];
+            memset(junk, 0xEE, sizeof(junk));
+            DWORD got = 0;
+            SetFilePointer(hf, 0, NULL, FILE_BEGIN);
+            WriteFile(hf, junk, sizeof(junk), &got, NULL);
+            SetFilePointer(hf, 4096, NULL, FILE_BEGIN);
+            WriteFile(hf, junk, sizeof(junk), &got, NULL);
+            CloseHandle(hf);
+        }
+    }
+    c = tels_open(P4, FALSE);
+    TEST("container opens with both superblocks damaged", c != NULL);
+    if (c) {
+        char hb3[8] = {0};
+        TelsId f5 = 0;
+        TEST("replay restores the content with no superblock",
+             tels_lookup(c, d5, "a.txt", &f5) && tels_read(c, f5, 0, hb3, 5) == 5 && memcmp(hb3, "hello", 5) == 0);
+        tels_close(c);
+    }
+
+    /* حذف یک پوشه با تمام زیرمجموعه‌ها، و ماندگاری حذف */
+    const char *P5 = "tels_test_del.tels";
+    DeleteFileA(P5);
+    c = tels_open(P5, TRUE);
+    if (c) {
+        TelsId tree = 0, sub = 0, leaf = 0;
+        tels_create(c, TELS_ROOT, "tree", TELS_TYPE_DIR, &tree);
+        tels_create(c, tree, "sub", TELS_TYPE_DIR, &sub);
+        tels_create(c, sub, "leaf.bin", TELS_TYPE_FILE, &leaf);
+        tels_write(c, leaf, 0, "data", 4);
+        TEST("subtree deleted", tels_delete(c, tree));
+        TEST("deleted subtree is gone", !tels_lookup(c, TELS_ROOT, "tree", NULL));
+        TEST("the root itself cannot be deleted", !tels_delete(c, TELS_ROOT));
+        tels_close(c);
+        c = tels_open(P5, FALSE);
+        TEST("deletion survives reopen", c && !tels_lookup(c, TELS_ROOT, "tree", NULL));
+        if (c) tels_close(c);
+    }
+
+    /* همروندی: چهار thread روی بازه‌های جدا می‌نویسند (مثل segment های موازی) */
+    const char *P6 = "tels_test_conc.tels";
+    DeleteFileA(P6);
+    c = tels_open(P6, TRUE);
+    if (c) {
+        TelsId big = 0;
+        tels_create(c, TELS_ROOT, "big.bin", TELS_TYPE_FILE, &big);
+        TelsWriterArg wa[4];
+        HANDLE th[4];
+        for (int t = 0; t < 4; t++) {
+            wa[t].c = c;
+            wa[t].id = big;
+            wa[t].t = t;
+            th[t] = CreateThread(NULL, 0, tels_writer_proc, &wa[t], 0, NULL);
+        }
+        WaitForMultipleObjects(4, th, TRUE, 30000);
+        for (int t = 0; t < 4; t++) CloseHandle(th[t]);
+        uint8_t blk[512];
+        BOOL conc_ok = TRUE;
+        for (int i = 0; i < 200 && conc_ok; i++) {
+            for (int t = 0; t < 4 && conc_ok; t++) {
+                uint64_t off = (uint64_t)(i * 4 + t) * 512u;
+                if (tels_read(c, big, off, blk, 512) != 512) conc_ok = FALSE;
+                for (int k = 0; k < 512 && conc_ok; k++)
+                    if (blk[k] != (uint8_t)('A' + t)) conc_ok = FALSE;
+            }
+        }
+        TEST("four concurrent writers land their ranges without corruption", conc_ok);
+        TEST("commit after concurrent writes", tels_commit(c));
+        tels_close(c);
+    }
+
+    /* یک پوشه با ۲۰۰۰ فایل: فهرست و بازیابی درست باشد */
+    const char *P7 = "tels_test_many.tels";
+    DeleteFileA(P7);
+    c = tels_open(P7, TRUE);
+    if (c) {
+        TelsId many = 0;
+        tels_create(c, TELS_ROOT, "many", TELS_TYPE_DIR, &many);
+        BOOL made_all = TRUE;
+        for (int i = 0; i < 2000 && made_all; i++) {
+            char nm[24];
+            snprintf(nm, sizeof(nm), "f%04d.dat", i);
+            made_all = tels_create(c, many, nm, TELS_TYPE_FILE, NULL);
+        }
+        TEST("2000 files created in one directory", made_all);
+        static TelsId ids[2100];
+        TEST("list reports all 2000 files", tels_list(c, many, ids, 2100) == 2000);
+        TEST("commit with 2000 entries", tels_commit(c));
+        tels_close(c);
+        c = tels_open(P7, FALSE);
+        TelsId many2 = 0;
+        TEST("reopen keeps all 2000 files",
+             c && tels_lookup(c, TELS_ROOT, "many", &many2) && tels_list(c, many2, ids, 2100) == 2000);
+        if (c) tels_close(c);
+    }
+
+    DeleteFileA(P);
+    DeleteFileA(P2);
+    DeleteFileA(P3);
+    DeleteFileA(P4);
+    DeleteFileA(P5);
+    DeleteFileA(P6);
+    DeleteFileA(P7);
+}
+
 static void test_crash_report(void) {
     SECTION("Crash Report (fault location + call stack)");
 
@@ -3306,6 +3649,7 @@ int main(void) {
     test_dl_lifecycle();
     test_ftp_download();
     test_url_credentials();
+    test_tels_container();
     test_launch_retry_backoff();
     test_permanent_vs_transient_errors();
     test_http_extract_host();
