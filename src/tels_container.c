@@ -1,32 +1,56 @@
-/* tels_container.c — رجوع کن به tels_container.h */
+/* tels_container.c — رجوع کن به tels_container.h
+
+   قالب نسخه‌ی ۲ (روی دیسک):
+     ۰        superblock A (۴۰۹۶ بایت)
+     ۴۰۹۶     superblock B (۴۰۹۶ بایت)
+     ۸۱۹۲     رکورد کلید: کلید ۲۵۶ بیتی wrap شده با DPAPI (هدر ۶۴ بایت + blob)
+     ۱۲۲۸۸    ناحیه‌ی داده: رکوردهای رمزنگاری‌شده، پشت‌سرهم
+
+   هر رکورد ۶۴ بایت هدر دارد: magic، شناسه، نوع، آفست منطقی، طول متن ساده، nonce ۱۲ بایتی،
+   تگ GCM ۱۶ بایتی و CRC32. CRC32 روی بایت‌های روی دیسک محاسبه می‌شود و خرابی تصادفی یا
+   نیمه‌نوشتن را بدون کلید تشخیص می‌دهد. تگ GCM رمزنگاری و احراز اصالت را انجام می‌دهد و
+   هدر رکورد (نوع، شناسه، آفست، طول، موقعیت) را به‌عنوان AAD به تگ وصل می‌کند؛ پس دست‌کاری
+   یا جابه‌جایی رکورد تشخیص داده می‌شود. nonce هر رکورد تصادفی است (BCryptGenRandom)؛ NIST
+   تا ۲^۳۲ بار رمزنگاری با یک کلید را برای nonce تصادفی مجاز می‌داند، و یک container به این
+   تعداد نمی‌رسد. */
 
 #include <windows.h>
+#include <bcrypt.h>
+#include <wincrypt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include "tels_container.h"
+#include "lass_log.h"
 
 #define TELS_SB_SIZE           4096u
 #define TELS_SB_SLOT_A         0u
 #define TELS_SB_SLOT_B         4096u
-#define TELS_DATA_START        8192u
-#define TELS_VERSION           1u
-#define TELS_REC_MAGIC         0x4345524Cu   /* بایت‌ها: 4C 52 45 43 */
-#define TELS_REC_HDR           40u
+#define TELS_KEY_SLOT          8192u
+#define TELS_DATA_START        12288u
+#define TELS_VERSION           2u
+#define TELS_REC_MAGIC         0x4345524Cu
+#define TELS_REC_HDR           64u
+#define TELS_NONCE_LEN         12u
+#define TELS_TAG_LEN           16u
+#define TELS_AAD_LEN           25u
+#define TELS_KEY_LEN           32u
+#define TELS_KEY_BLOB_MAX      1024u
 #define TELS_IDX_MAGIC         0x58444949u   /* "IIDX" */
 #define TELS_IDX_VERSION       1u
 #define TELS_MAX_INDEX         (256u * 1024u * 1024u)
-#define TELS_CHUNK             65536u
 #define TELS_MAX_EXT_PER_ENTRY 4000000u
-#define TELS_EXT_BYTES         20u           /* off(8) + len(4) + pos(8) */
+#define TELS_EXT_BYTES         32u           /* off(8) len(4) rec_pos(8) rec_off(8) rec_len(4) */
 
-enum { REC_DATA = 1, REC_CREATE = 2, REC_DELETE = 3, REC_INDEX = 4 };
+enum { REC_DATA = 1, REC_CREATE = 2, REC_DELETE = 3, REC_INDEX = 4, REC_KEY = 5 };
 
 typedef struct {
-    uint64_t off;     /* آفست منطقی داخل entry */
+    uint64_t off;       /* آفست منطقی این قطعه داخل entry */
     uint32_t len;
-    uint64_t pos;     /* آفست بایت‌ها در فایل */
+    uint64_t rec_pos;   /* موقعیت هدر رکوردی که داده‌ی این قطعه را دارد */
+    uint64_t rec_off;   /* آفست منطقی اولین بایت متن ساده‌ی آن رکورد */
+    uint32_t rec_len;   /* طول متن ساده‌ی آن رکورد */
 } TelsExtent;
 
 typedef struct {
@@ -41,15 +65,19 @@ typedef struct {
 } TelsEntry;
 
 struct TelsContainer {
-    HANDLE           file;
-    CRITICAL_SECTION lock;
-    BOOL             writable;
-    TelsEntry      **entries;      /* entries[id]؛ NULL یعنی خالی یا حذف‌شده */
-    uint32_t         entry_cap;
-    uint32_t         next_id;      /* شناسه‌ی بعدی؛ 0 برای ریشه رزرو است */
-    uint64_t         append_pos;   /* انتهای رکوردهای معتبر */
-    uint64_t         gen;          /* نسل آخرین commit */
+    HANDLE            file;
+    CRITICAL_SECTION  lock;
+    BOOL              writable;
+    BCRYPT_ALG_HANDLE alg;
+    BCRYPT_KEY_HANDLE key;
+    TelsEntry       **entries;     /* entries[id]؛ NULL یعنی خالی یا حذف‌شده */
+    uint32_t          entry_cap;
+    uint32_t          next_id;     /* شناسه‌ی بعدی؛ 0 برای ریشه رزرو است */
+    uint64_t          append_pos;  /* انتهای رکوردهای معتبر */
+    uint64_t          gen;         /* نسل آخرین commit */
 };
+
+static const uint8_t g_empty[1] = {0};
 
 /* ───── CRC32 (IEEE) ───── */
 
@@ -81,7 +109,7 @@ static uint32_t crc32_feed(uint32_t crc, const uint8_t *p, size_t n) {
 /* ───── کدگذاری little-endian ───── */
 
 static void put_u32(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)v;       p[1] = (uint8_t)(v >> 8);
+    p[0] = (uint8_t)v;         p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
 static void put_u64(uint8_t *p, uint64_t v) {
@@ -96,7 +124,7 @@ static uint64_t get_u64(const uint8_t *p) {
 }
 static uint64_t min64(uint64_t a, uint64_t b) { return a < b ? a : b; }
 
-/* ───── ورودی/خروجی فایل (زیر قفل صدا زده شود) ───── */
+/* ───── ورودی/خروجی فایل (زیر قفل یا در مسیر باز شدن صدا زده شود) ───── */
 
 static BOOL read_at(TelsContainer *c, uint64_t pos, void *buf, uint32_t len) {
     LARGE_INTEGER li;
@@ -130,6 +158,128 @@ static uint64_t file_size(TelsContainer *c) {
     LARGE_INTEGER li;
     if (!GetFileSizeEx(c->file, &li)) return 0;
     return (uint64_t)li.QuadPart;
+}
+
+/* ───── رمزنگاری: AES-256-GCM از BCrypt و کلید wrap شده با DPAPI ───── */
+
+static BOOL crypto_open(TelsContainer *c, const uint8_t *key) {
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&c->alg, BCRYPT_AES_ALGORITHM, NULL, 0)))
+        return FALSE;
+    if (!BCRYPT_SUCCESS(BCryptSetProperty(c->alg, BCRYPT_CHAINING_MODE,
+                                          (PUCHAR)BCRYPT_CHAIN_MODE_GCM,
+                                          (ULONG)sizeof(BCRYPT_CHAIN_MODE_GCM), 0)))
+        return FALSE;
+    return BCRYPT_SUCCESS(BCryptGenerateSymmetricKey(c->alg, &c->key, NULL, 0,
+                                                     (PUCHAR)key, TELS_KEY_LEN, 0));
+}
+
+static void crypto_close(TelsContainer *c) {
+    if (c->key) { BCryptDestroyKey(c->key); c->key = NULL; }
+    if (c->alg) { BCryptCloseAlgorithmProvider(c->alg, 0); c->alg = NULL; }
+}
+
+static BOOL aead_encrypt(TelsContainer *c, const uint8_t *aad, uint32_t aad_len,
+                         const uint8_t *plain, uint32_t n, uint8_t *cipher_out,
+                         uint8_t nonce[TELS_NONCE_LEN], uint8_t tag[TELS_TAG_LEN]) {
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(NULL, nonce, TELS_NONCE_LEN, BCRYPT_USE_SYSTEM_PREFERRED_RNG)))
+        return FALSE;
+    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+    BCRYPT_INIT_AUTH_MODE_INFO(info);
+    info.pbNonce = nonce;
+    info.cbNonce = TELS_NONCE_LEN;
+    info.pbTag = tag;
+    info.cbTag = TELS_TAG_LEN;
+    info.pbAuthData = (PUCHAR)aad;
+    info.cbAuthData = aad_len;
+    ULONG written = 0;
+    NTSTATUS st = BCryptEncrypt(c->key, (PUCHAR)plain, n, &info, NULL, 0,
+                                cipher_out, n, &written, 0);
+    return BCRYPT_SUCCESS(st) && written == n;
+}
+
+static BOOL aead_decrypt(TelsContainer *c, const uint8_t *aad, uint32_t aad_len,
+                         const uint8_t *cipher, uint32_t n,
+                         const uint8_t *nonce, const uint8_t *tag, uint8_t *plain_out) {
+    uint8_t nn[TELS_NONCE_LEN], tt[TELS_TAG_LEN];
+    memcpy(nn, nonce, TELS_NONCE_LEN);
+    memcpy(tt, tag, TELS_TAG_LEN);
+    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+    BCRYPT_INIT_AUTH_MODE_INFO(info);
+    info.pbNonce = nn;
+    info.cbNonce = TELS_NONCE_LEN;
+    info.pbTag = tt;
+    info.cbTag = TELS_TAG_LEN;
+    info.pbAuthData = (PUCHAR)aad;
+    info.cbAuthData = aad_len;
+    ULONG written = 0;
+    NTSTATUS st = BCryptDecrypt(c->key, (PUCHAR)cipher, n, &info, NULL, 0,
+                                plain_out, n, &written, 0);
+    return BCRYPT_SUCCESS(st) && written == n;
+}
+
+/* AAD: نوع، شناسه، آفست منطقی، طول متن ساده، و موقعیت رکورد در فایل */
+static void build_aad(uint8_t *aad, uint8_t kind, TelsId id, uint64_t off, uint32_t plen, uint64_t rec_pos) {
+    aad[0] = kind;
+    put_u32(aad + 1, id);
+    put_u64(aad + 5, off);
+    put_u32(aad + 13, plen);
+    put_u64(aad + 17, rec_pos);
+}
+
+/* کلید تازه می‌سازد، DPAPI wrap می‌کند و در رکورد کلید می‌نویسد؛ زیر قفل یا هنگام ایجاد */
+static BOOL create_key(TelsContainer *c) {
+    uint8_t raw[TELS_KEY_LEN];
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(NULL, raw, sizeof(raw), BCRYPT_USE_SYSTEM_PREFERRED_RNG)))
+        return FALSE;
+    DATA_BLOB in, out;
+    in.pbData = raw;
+    in.cbData = sizeof(raw);
+    out.pbData = NULL;
+    out.cbData = 0;
+    BOOL ok = CryptProtectData(&in, L"lass-tels", NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &out) &&
+              out.cbData > 0 && out.cbData <= TELS_KEY_BLOB_MAX;
+    if (ok) {
+        uint8_t slot[TELS_REC_HDR + TELS_KEY_BLOB_MAX];
+        memset(slot, 0, sizeof(slot));
+        put_u32(slot, TELS_REC_MAGIC);
+        slot[8] = REC_KEY;
+        put_u32(slot + 20, out.cbData);
+        memcpy(slot + TELS_REC_HDR, out.pbData, out.cbData);
+        uint32_t crc = crc32_feed(0, slot, 60);
+        crc = crc32_feed(crc, out.pbData, out.cbData);
+        put_u32(slot + 60, crc);
+        ok = write_at(c, TELS_KEY_SLOT, slot, TELS_REC_HDR + out.cbData) &&
+             crypto_open(c, raw);
+    }
+    SecureZeroMemory(raw, sizeof(raw));
+    if (out.pbData) LocalFree(out.pbData);
+    return ok;
+}
+
+/* رکورد کلید را می‌خواند، CRC و DPAPI را بررسی می‌کند و کلید را باز می‌کند */
+static BOOL load_key(TelsContainer *c) {
+    uint8_t hdr[TELS_REC_HDR];
+    if (!read_at(c, TELS_KEY_SLOT, hdr, TELS_REC_HDR)) return FALSE;
+    if (get_u32(hdr) != TELS_REC_MAGIC || hdr[8] != REC_KEY) return FALSE;
+    uint32_t blen = get_u32(hdr + 20);
+    if (blen == 0 || blen > TELS_KEY_BLOB_MAX) return FALSE;
+    uint8_t blob[TELS_KEY_BLOB_MAX];
+    if (!read_at(c, TELS_KEY_SLOT + TELS_REC_HDR, blob, blen)) return FALSE;
+    uint32_t crc = crc32_feed(0, hdr, 60);
+    crc = crc32_feed(crc, blob, blen);
+    if (crc != get_u32(hdr + 60)) return FALSE;
+
+    DATA_BLOB in, out;
+    in.pbData = blob;
+    in.cbData = blen;
+    out.pbData = NULL;
+    out.cbData = 0;
+    if (!CryptUnprotectData(&in, NULL, NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &out))
+        return FALSE;
+    BOOL ok = (out.cbData == TELS_KEY_LEN) && crypto_open(c, out.pbData);
+    SecureZeroMemory(out.pbData, out.cbData);
+    LocalFree(out.pbData);
+    return ok;
 }
 
 /* ───── نام‌ها و عمق ───── */
@@ -219,8 +369,9 @@ static void entries_clear(TelsContainer *c) {
     c->next_id = 1;
 }
 
-/* افزودن یک extent و بریدن بخش‌های همپوشان قدیمی؛ extent ها همیشه مرتب و جدا هستند */
-static BOOL entry_add_extent(TelsEntry *e, uint64_t off, uint32_t len, uint64_t pos) {
+/* افزودن یک قطعه و بریدن بخش‌های همپوشان قدیمی؛ قطعه‌ها همیشه مرتب و جدا هستند */
+static BOOL entry_add_extent(TelsEntry *e, uint64_t off, uint32_t len,
+                             uint64_t rec_pos, uint64_t rec_off, uint32_t rec_len) {
     uint64_t end = off + len;
     TelsExtent *n = (TelsExtent *)malloc(sizeof(TelsExtent) * ((size_t)e->ext_count + 2u));
     if (!n) return FALSE;
@@ -232,24 +383,25 @@ static BOOL entry_add_extent(TelsEntry *e, uint64_t off, uint32_t len, uint64_t 
             n[k++] = *x;
             continue;
         }
-        if (x->off < off) {
-            n[k].off = x->off;
+        if (x->off < off) {                 /* قطعه‌ی چپ: همان رکورد، طول کوتاه‌تر */
+            n[k] = *x;
             n[k].len = (uint32_t)(off - x->off);
-            n[k].pos = x->pos;
             k++;
         }
-        if (xend > end) {
+        if (xend > end) {                   /* قطعه‌ی راست: همان رکورد، از end به بعد */
+            n[k] = *x;
             n[k].off = end;
             n[k].len = (uint32_t)(xend - end);
-            n[k].pos = x->pos + (end - x->off);
             k++;
         }
     }
     n[k].off = off;
     n[k].len = len;
-    n[k].pos = pos;
+    n[k].rec_pos = rec_pos;
+    n[k].rec_off = rec_off;
+    n[k].rec_len = rec_len;
     k++;
-    for (uint32_t i = 1; i < k; i++) {       /* مرتب‌سازی درجی */
+    for (uint32_t i = 1; i < k; i++) {      /* مرتب‌سازی درجی */
         TelsExtent t = n[i];
         uint32_t j = i;
         while (j > 0 && n[j - 1].off > t.off) {
@@ -287,27 +439,62 @@ static void entry_delete_subtree(TelsContainer *c, TelsId root) {
 
 /* ───── رکوردها ───── */
 
+/* رکورد رمزنگاری‌شده‌ی تازه را در انتهای رکوردهای معتبر می‌نویسد */
 static BOOL append_record(TelsContainer *c, uint8_t kind, TelsId id, uint64_t off,
-                          const void *payload, uint32_t plen,
-                          uint64_t *rec_pos, uint64_t *payload_pos) {
-    uint8_t hdr[TELS_REC_HDR];
-    memset(hdr, 0, sizeof(hdr));
-    put_u32(hdr, TELS_REC_MAGIC);
-    put_u32(hdr + 4, id);
-    hdr[8] = kind;
-    put_u64(hdr + 12, off);
-    put_u32(hdr + 20, plen);
-    uint32_t crc = crc32_feed(0, hdr, 32);
-    if (plen) crc = crc32_feed(crc, (const uint8_t *)payload, plen);
-    put_u32(hdr + 32, crc);
-
+                          const uint8_t *payload, uint32_t plen, uint64_t *rec_pos_out) {
     uint64_t pos = c->append_pos;
-    if (!write_at(c, pos, hdr, TELS_REC_HDR)) return FALSE;
-    if (plen && !write_at(c, pos + TELS_REC_HDR, payload, plen)) return FALSE;
-    if (rec_pos) *rec_pos = pos;
-    if (payload_pos) *payload_pos = pos + TELS_REC_HDR;
-    c->append_pos = pos + TELS_REC_HDR + plen;
-    return TRUE;
+    uint8_t aad[TELS_AAD_LEN];
+    build_aad(aad, kind, id, off, plen, pos);
+    uint8_t *cipher = (uint8_t *)malloc(plen ? plen : 1u);
+    if (!cipher) return FALSE;
+    uint8_t nonce[TELS_NONCE_LEN], tag[TELS_TAG_LEN];
+    BOOL ok = aead_encrypt(c, aad, TELS_AAD_LEN, plen ? payload : g_empty, plen, cipher, nonce, tag);
+    if (ok) {
+        uint8_t hdr[TELS_REC_HDR];
+        memset(hdr, 0, sizeof(hdr));
+        put_u32(hdr, TELS_REC_MAGIC);
+        put_u32(hdr + 4, id);
+        hdr[8] = kind;
+        put_u64(hdr + 12, off);
+        put_u32(hdr + 20, plen);
+        memcpy(hdr + 32, nonce, TELS_NONCE_LEN);
+        memcpy(hdr + 44, tag, TELS_TAG_LEN);
+        uint32_t crc = crc32_feed(0, hdr, 60);
+        if (plen) crc = crc32_feed(crc, cipher, plen);
+        put_u32(hdr + 60, crc);
+        ok = write_at(c, pos, hdr, TELS_REC_HDR) &&
+             (plen == 0 || write_at(c, pos + TELS_REC_HDR, cipher, plen));
+    }
+    free(cipher);
+    if (ok) {
+        if (rec_pos_out) *rec_pos_out = pos;
+        c->append_pos = pos + TELS_REC_HDR + plen;
+    }
+    return ok;
+}
+
+/* متن ساده‌ی یک رکورد داده را می‌خواند و CRC و GCM را بررسی می‌کند (برای خواندن داده) */
+static BOOL read_record_plain(TelsContainer *c, uint64_t rec_pos, uint32_t expect_len, uint8_t *plain_out) {
+    uint8_t hdr[TELS_REC_HDR];
+    if (!read_at(c, rec_pos, hdr, TELS_REC_HDR)) return FALSE;
+    if (get_u32(hdr) != TELS_REC_MAGIC || hdr[8] != REC_DATA) return FALSE;
+    uint32_t plen = get_u32(hdr + 20);
+    if (plen != expect_len) return FALSE;
+    uint8_t *cipher = (uint8_t *)malloc(plen ? plen : 1u);
+    if (!cipher) return FALSE;
+    BOOL ok = (plen == 0) || read_at(c, rec_pos + TELS_REC_HDR, cipher, plen);
+    if (ok) {
+        uint32_t crc = crc32_feed(0, hdr, 60);
+        if (plen) crc = crc32_feed(crc, cipher, plen);
+        ok = (crc == get_u32(hdr + 60));
+    }
+    if (ok) {
+        uint8_t aad[TELS_AAD_LEN];
+        build_aad(aad, REC_DATA, get_u32(hdr + 4), get_u64(hdr + 12), plen, rec_pos);
+        ok = aead_decrypt(c, aad, TELS_AAD_LEN, cipher, plen, hdr + 32, hdr + 44, plain_out);
+    }
+    free(cipher);
+    return ok;
 }
 
 /* ───── index ───── */
@@ -325,25 +512,27 @@ static BOOL serialize_index(TelsContainer *c, uint8_t **out, uint32_t *out_len) 
     uint8_t *buf = (uint8_t *)malloc((size_t)total);
     if (!buf) return FALSE;
     uint8_t *p = buf;
-    put_u32(p, TELS_IDX_MAGIC);     p += 4;
-    put_u32(p, TELS_IDX_VERSION);   p += 4;
-    put_u32(p, c->next_id);         p += 4;
-    put_u32(p, count);              p += 4;
+    put_u32(p, TELS_IDX_MAGIC);   p += 4;
+    put_u32(p, TELS_IDX_VERSION); p += 4;
+    put_u32(p, c->next_id);       p += 4;
+    put_u32(p, count);            p += 4;
     for (TelsId i = 1; i < c->next_id; i++) {
         TelsEntry *e = c->entries[i];
         if (!e) continue;
-        put_u32(p, e->id);          p += 4;
-        put_u32(p, e->parent);      p += 4;
+        put_u32(p, e->id);        p += 4;
+        put_u32(p, e->parent);    p += 4;
         *p++ = e->type;
         *p++ = e->name_len;
         memcpy(p, e->name, e->name_len);
         p += e->name_len;
-        put_u64(p, e->size);        p += 8;
-        put_u32(p, e->ext_count);   p += 4;
+        put_u64(p, e->size);      p += 8;
+        put_u32(p, e->ext_count); p += 4;
         for (uint32_t j = 0; j < e->ext_count; j++) {
-            put_u64(p, e->ext[j].off);   p += 8;
-            put_u32(p, e->ext[j].len);   p += 4;
-            put_u64(p, e->ext[j].pos);   p += 8;
+            put_u64(p, e->ext[j].off);     p += 8;
+            put_u32(p, e->ext[j].len);     p += 4;
+            put_u64(p, e->ext[j].rec_pos); p += 8;
+            put_u64(p, e->ext[j].rec_off); p += 8;
+            put_u32(p, e->ext[j].rec_len); p += 4;
         }
     }
     *out = buf;
@@ -369,7 +558,7 @@ static BOOL parse_index(TelsContainer *c, const uint8_t *buf, uint32_t len) {
         uint8_t type = p[8];
         uint8_t nlen = p[9];
         p += 10;
-        if (nlen == 0 || (uint64_t)(end - p) < (uint64_t)nlen + 12u) goto bad;  /* uint8_t: ≤ 255 */
+        if (nlen == 0 || (uint64_t)(end - p) < (uint64_t)nlen + 12u) goto bad;   /* uint8_t: ≤ 255 */
         if (id == 0 || id >= next_id) goto bad;
         if (type != TELS_TYPE_FILE && type != TELS_TYPE_DIR) goto bad;
         if (parent != TELS_ROOT && parent >= id) goto bad;
@@ -394,11 +583,15 @@ static BOOL parse_index(TelsContainer *c, const uint8_t *buf, uint32_t len) {
         uint64_t prev_end = 0;
         for (uint32_t j = 0; j < ec; j++) {
             TelsExtent *x = &e->ext[j];
-            x->off = get_u64(p);
-            x->len = get_u32(p + 8);
-            x->pos = get_u64(p + 12);
+            x->off     = get_u64(p);
+            x->len     = get_u32(p + 8);
+            x->rec_pos = get_u64(p + 12);
+            x->rec_off = get_u64(p + 20);
+            x->rec_len = get_u32(p + 28);
             p += TELS_EXT_BYTES;
             if (x->len == 0 || x->off < prev_end) goto bad;
+            if (x->rec_pos < TELS_DATA_START || x->rec_off > x->off) goto bad;
+            if (x->off + x->len > x->rec_off + x->rec_len) goto bad;
             prev_end = x->off + x->len;
         }
     }
@@ -411,23 +604,34 @@ bad:
     return FALSE;
 }
 
-/* index را از آفست داده شده می‌خواند و CRC و ساختار را بررسی می‌کند */
+/* index رمزنگاری‌شده را از آفست داده شده می‌خواند؛ CRC و GCM را بررسی می‌کند */
 static BOOL load_index_at(TelsContainer *c, uint64_t pos, uint64_t *payload_end) {
     uint8_t hdr[TELS_REC_HDR];
     if (!read_at(c, pos, hdr, TELS_REC_HDR)) return FALSE;
     if (get_u32(hdr) != TELS_REC_MAGIC || hdr[8] != REC_INDEX) return FALSE;
     uint32_t plen = get_u32(hdr + 20);
     if (plen > TELS_MAX_INDEX) return FALSE;
-    uint8_t *buf = (uint8_t *)malloc(plen ? plen : 1u);
-    if (!buf) return FALSE;
-    BOOL ok = (plen == 0) || read_at(c, pos + TELS_REC_HDR, buf, plen);
-    if (ok) {
-        uint32_t crc = crc32_feed(0, hdr, 32);
-        if (plen) crc = crc32_feed(crc, buf, plen);
-        ok = (crc == get_u32(hdr + 32));
+    uint8_t *cipher = (uint8_t *)malloc(plen ? plen : 1u);
+    uint8_t *plain  = (uint8_t *)malloc(plen ? plen : 1u);
+    if (!cipher || !plain) {
+        free(cipher);
+        free(plain);
+        return FALSE;
     }
-    if (ok) ok = parse_index(c, buf, plen);
-    free(buf);
+    BOOL ok = (plen == 0) || read_at(c, pos + TELS_REC_HDR, cipher, plen);
+    if (ok) {
+        uint32_t crc = crc32_feed(0, hdr, 60);
+        if (plen) crc = crc32_feed(crc, cipher, plen);
+        ok = (crc == get_u32(hdr + 60));
+    }
+    if (ok) {
+        uint8_t aad[TELS_AAD_LEN];
+        build_aad(aad, REC_INDEX, get_u32(hdr + 4), get_u64(hdr + 12), plen, pos);
+        ok = aead_decrypt(c, aad, TELS_AAD_LEN, cipher, plen, hdr + 32, hdr + 44, plain);
+    }
+    if (ok) ok = parse_index(c, plain, plen);
+    free(cipher);
+    free(plain);
     if (ok && payload_end) *payload_end = pos + TELS_REC_HDR + plen;
     return ok;
 }
@@ -439,7 +643,7 @@ static BOOL apply_create(TelsContainer *c, TelsId id, const uint8_t *p, uint32_t
     TelsId parent = get_u32(p);
     uint8_t type = p[4];
     uint8_t nlen = p[5];
-    if (nlen == 0 || plen != 6u + nlen) return FALSE;  /* uint8_t: ≤ 255 */
+    if (nlen == 0 || plen != 6u + nlen) return FALSE;                  /* uint8_t: ≤ 255 */
     if (type != TELS_TYPE_FILE && type != TELS_TYPE_DIR) return FALSE;
     if (id == 0 || id >= TELS_MAX_ENTRIES) return FALSE;
     if (id < c->entry_cap && c->entries[id]) return FALSE;
@@ -456,22 +660,19 @@ static BOOL apply_create(TelsContainer *c, TelsId id, const uint8_t *p, uint32_t
     return entry_new(c, id, parent, type, name, nlen) != NULL;
 }
 
-static BOOL apply_data(TelsContainer *c, TelsId id, uint64_t off, uint64_t pos, uint32_t len) {
+static BOOL apply_data(TelsContainer *c, TelsId id, uint64_t off, uint32_t len, uint64_t rec_pos) {
     TelsEntry *e = entry_get(c, id);
     if (!e || e->type != TELS_TYPE_FILE || len == 0) return FALSE;
     if (off + len < off) return FALSE;
-    return entry_add_extent(e, off, len, pos);
+    return entry_add_extent(e, off, len, rec_pos, off, len);
 }
 
-/* رکوردهای معتبر از pos تا اولین رکورد خراب را اعمال می‌کند؛ valid_end انتهای آخرین رکورد سالم است */
+/* رکوردهای معتبر از pos را تا اولین رکورد خراب اعمال می‌کند؛ valid_end انتهای آخرین رکورد سالم است */
 static BOOL replay(TelsContainer *c, uint64_t start, uint64_t *valid_end) {
     uint64_t fsize = file_size(c);
     uint64_t pos = start;
-    uint8_t *chunk = (uint8_t *)malloc(TELS_CHUNK);
-    uint8_t *payload = NULL;
-    uint32_t payload_cap = 0;
-    if (!chunk) return FALSE;
-
+    uint8_t *buf = NULL, *plain = NULL;
+    uint32_t cap = 0;
     while (pos + TELS_REC_HDR <= fsize) {
         uint8_t hdr[TELS_REC_HDR];
         if (!read_at(c, pos, hdr, TELS_REC_HDR)) break;
@@ -480,41 +681,41 @@ static BOOL replay(TelsContainer *c, uint64_t start, uint64_t *valid_end) {
         TelsId id = get_u32(hdr + 4);
         uint64_t off = get_u64(hdr + 12);
         uint32_t plen = get_u32(hdr + 20);
-        uint64_t limit = (kind == REC_INDEX) ? TELS_MAX_INDEX : TELS_MAX_RECORD;
-        if ((uint64_t)plen > limit) break;
-        if (pos + TELS_REC_HDR + plen > fsize) break;          /* رکورد نیمه‌نوشته */
-
-        uint32_t crc = crc32_feed(0, hdr, 32);
-        BOOL ok = TRUE;
-        if (kind == REC_DATA) {
-            uint64_t done = 0;
-            while (ok && done < plen) {
-                uint32_t n = (uint32_t)min64(TELS_CHUNK, plen - done);
-                ok = read_at(c, pos + TELS_REC_HDR + done, chunk, n);
-                if (ok) crc = crc32_feed(crc, chunk, n);
-                done += n;
-            }
-        } else if (plen > 0) {
-            if (plen > payload_cap) {
-                free(payload);
-                payload = (uint8_t *)malloc(plen);
-                payload_cap = payload ? plen : 0;
-                if (!payload) ok = FALSE;
-            }
-            if (ok) {
-                ok = read_at(c, pos + TELS_REC_HDR, payload, plen);
-                if (ok) crc = crc32_feed(crc, payload, plen);
-            }
+        if (kind != REC_DATA && kind != REC_CREATE && kind != REC_DELETE && kind != REC_INDEX) break;
+        if ((uint64_t)plen > ((kind == REC_INDEX) ? TELS_MAX_INDEX : TELS_MAX_RECORD)) break;
+        if (pos + TELS_REC_HDR + plen > fsize) break;                     /* رکورد نیمه‌نوشته */
+        if (!buf || plen > cap) {
+            free(buf);
+            free(plain);
+            cap = plen ? plen : 1u;
+            buf = (uint8_t *)malloc(cap);
+            plain = (uint8_t *)malloc(cap);
+            if (!buf || !plain) { cap = 0; break; }
         }
-        if (!ok || crc != get_u32(hdr + 32)) break;
+        if (plen && !read_at(c, pos + TELS_REC_HDR, buf, plen)) break;
+
+        uint32_t crc = crc32_feed(0, hdr, 60);
+        if (plen) crc = crc32_feed(crc, buf, plen);
+        if (crc != get_u32(hdr + 60)) {
+            LOGW(LOG_MOD_CORE, "tels: damaged or torn record at %llu (CRC), replay stopped",
+                 (unsigned long long)pos);
+            break;
+        }
+        uint8_t aad[TELS_AAD_LEN];
+        build_aad(aad, kind, id, off, plen, pos);
+        if (!aead_decrypt(c, aad, TELS_AAD_LEN, buf, plen, hdr + 32, hdr + 44, plain)) {
+            LOGW(LOG_MOD_CORE, "tels: record at %llu failed authentication (tampered or wrong key), replay stopped",
+                 (unsigned long long)pos);
+            break;
+        }
 
         BOOL applied = FALSE;
         switch (kind) {
         case REC_DATA:
-            applied = apply_data(c, id, off, pos + TELS_REC_HDR, plen);
+            applied = apply_data(c, id, off, plen, pos);
             break;
         case REC_CREATE:
-            applied = (off == 0) && apply_create(c, id, payload, plen);
+            applied = (off == 0) && apply_create(c, id, plain, plen);
             break;
         case REC_DELETE:
             if (plen == 0 && id != TELS_ROOT && entry_get(c, id)) {
@@ -523,7 +724,7 @@ static BOOL replay(TelsContainer *c, uint64_t start, uint64_t *valid_end) {
             }
             break;
         case REC_INDEX:
-            applied = (id == 0 && off == 0) && parse_index(c, payload, plen);
+            applied = (id == 0 && off == 0) && parse_index(c, plain, plen);
             break;
         default:
             applied = FALSE;
@@ -531,8 +732,8 @@ static BOOL replay(TelsContainer *c, uint64_t start, uint64_t *valid_end) {
         if (!applied) break;
         pos += TELS_REC_HDR + plen;
     }
-    free(chunk);
-    free(payload);
+    free(buf);
+    free(plain);
     *valid_end = pos;
     return TRUE;
 }
@@ -571,6 +772,7 @@ static void container_release(TelsContainer *c) {
     if (!c) return;
     entries_clear(c);
     free(c->entries);
+    crypto_close(c);
     if (c->file != INVALID_HANDLE_VALUE) CloseHandle(c->file);
     DeleteCriticalSection(&c->lock);
     free(c);
@@ -595,10 +797,11 @@ TelsContainer *tels_open(const char *path, BOOL create) {
 
     uint64_t fsize = file_size(c);
     if (fsize == 0) {
-        /* کانتینر تازه: superblock A با نسل ۱ و بدون index؛ B خالی */
+        /* کانتینر تازه: کلید، superblock A با نسل ۱، و superblock B خالی */
         uint8_t zero[TELS_SB_SIZE];
         memset(zero, 0, sizeof(zero));
-        BOOL made = write_superblock(c, 1, 0, TELS_DATA_START, TELS_SB_SLOT_A) &&
+        BOOL made = create_key(c) &&
+                    write_superblock(c, 1, 0, TELS_DATA_START, TELS_SB_SLOT_A) &&
                     write_at(c, TELS_SB_SLOT_B, zero, TELS_SB_SIZE) &&
                     FlushFileBuffers(c->file);
         if (!made) {
@@ -608,6 +811,12 @@ TelsContainer *tels_open(const char *path, BOOL create) {
         c->gen = 1;
         c->append_pos = TELS_DATA_START;
         return c;
+    }
+
+    if (!load_key(c)) {
+        LOGE(LOG_MOD_CORE, "tels: key record cannot be read or unwrapped by this user on this machine");
+        container_release(c);
+        return NULL;
     }
 
     uint64_t ga = 0, ia = 0, ea = 0, gb = 0, ib = 0, eb = 0;
@@ -651,7 +860,7 @@ BOOL tels_commit(TelsContainer *c) {
     uint32_t len = 0;
     if (serialize_index(c, &buf, &len)) {
         uint64_t rec_pos = 0;
-        if (append_record(c, REC_INDEX, 0, 0, buf, len, &rec_pos, NULL) &&
+        if (append_record(c, REC_INDEX, 0, 0, buf, len, &rec_pos) &&
             FlushFileBuffers(c->file)) {
             uint64_t next_gen = c->gen + 1;
             uint64_t slot = (next_gen & 1u) ? TELS_SB_SLOT_A : TELS_SB_SLOT_B;
@@ -663,6 +872,25 @@ BOOL tels_commit(TelsContainer *c) {
         }
     }
     free(buf);
+    LeaveCriticalSection(&c->lock);
+    return ok;
+}
+
+/* تمام داده‌های فایل را بررسی می‌کند: CRC و GCM هر رکورد در هر قطعه؛ TRUE یعنی سالم */
+BOOL tels_verify(TelsContainer *c) {
+    if (!c) return FALSE;
+    BOOL ok = TRUE;
+    EnterCriticalSection(&c->lock);
+    for (TelsId i = 1; i < c->next_id && ok; i++) {
+        TelsEntry *e = c->entries[i];
+        if (!e || e->type != TELS_TYPE_FILE) continue;
+        for (uint32_t j = 0; j < e->ext_count && ok; j++) {
+            TelsExtent *x = &e->ext[j];
+            uint8_t *plain = (uint8_t *)malloc(x->rec_len ? x->rec_len : 1u);
+            ok = plain && read_record_plain(c, x->rec_pos, x->rec_len, plain);
+            free(plain);
+        }
+    }
     LeaveCriticalSection(&c->lock);
     return ok;
 }
@@ -699,7 +927,7 @@ BOOL tels_create(TelsContainer *c, TelsId parent, const char *name, TelsType typ
         payload[4] = (uint8_t)type;
         payload[5] = (uint8_t)nl;
         memcpy(payload + 6, name, nl);
-        if (!append_record(c, REC_CREATE, id, 0, payload, (uint32_t)(6 + nl), NULL, NULL)) goto done;
+        if (!append_record(c, REC_CREATE, id, 0, payload, (uint32_t)(6 + nl), NULL)) goto done;
         if (!entry_new(c, id, parent, (uint8_t)type, name, (uint8_t)nl)) goto done;
         if (out) *out = id;
         ok = TRUE;
@@ -727,9 +955,9 @@ BOOL tels_write(TelsContainer *c, TelsId id, uint64_t offset, const void *buf, u
     EnterCriticalSection(&c->lock);
     TelsEntry *e = entry_get(c, id);
     if (e && e->type == TELS_TYPE_FILE) {
-        uint64_t payload_pos = 0;
-        if (append_record(c, REC_DATA, id, offset, buf, len, NULL, &payload_pos))
-            ok = entry_add_extent(e, offset, len, payload_pos);
+        uint64_t rec_pos = 0;
+        if (append_record(c, REC_DATA, id, offset, (const uint8_t *)buf, len, &rec_pos))
+            ok = entry_add_extent(e, offset, len, rec_pos, offset, len);
     }
     LeaveCriticalSection(&c->lock);
     return ok;
@@ -751,14 +979,20 @@ int32_t tels_read(TelsContainer *c, TelsId id, uint64_t offset, void *buf, uint3
             memset(out, 0, want);
             result = (int32_t)want;
             uint64_t rs = offset, re = offset + want;
-            for (uint32_t i = 0; i < e->ext_count && result > 0; i++) {
+            for (uint32_t i = 0; i < e->ext_count; i++) {
                 TelsExtent *x = &e->ext[i];
                 uint64_t xs = x->off, xe = x->off + x->len;
                 uint64_t s = xs > rs ? xs : rs;
                 uint64_t t = xe < re ? xe : re;
                 if (s >= t) continue;
-                uint32_t n = (uint32_t)(t - s);
-                if (!read_at(c, x->pos + (s - xs), out + (s - rs), n)) result = -1;
+                uint8_t *plain = (uint8_t *)malloc(x->rec_len ? x->rec_len : 1u);
+                if (!plain || !read_record_plain(c, x->rec_pos, x->rec_len, plain)) {
+                    free(plain);
+                    result = -1;
+                    break;
+                }
+                memcpy(out + (s - rs), plain + (s - x->rec_off), (size_t)(t - s));
+                free(plain);
             }
         }
     }
@@ -780,7 +1014,7 @@ BOOL tels_delete(TelsContainer *c, TelsId id) {
     if (!c || !c->writable || id == TELS_ROOT) return FALSE;
     BOOL ok = FALSE;
     EnterCriticalSection(&c->lock);
-    if (entry_get(c, id) && append_record(c, REC_DELETE, id, 0, NULL, 0, NULL, NULL)) {
+    if (entry_get(c, id) && append_record(c, REC_DELETE, id, 0, NULL, 0, NULL)) {
         entry_delete_subtree(c, id);
         ok = TRUE;
     }

@@ -1972,7 +1972,7 @@ static void test_tels_container(void) {
             BOOL a_newer = tels_le64(sa + 12) > tels_le64(sbb + 12);
             uint64_t idx_pos = a_newer ? tels_le64(sa + 20) : tels_le64(sbb + 20);
             uint8_t junk = 0xAA;
-            SetFilePointer(hf, (LONG)(idx_pos + 56), NULL, FILE_BEGIN);
+            SetFilePointer(hf, (LONG)(idx_pos + 72), NULL, FILE_BEGIN);
             WriteFile(hf, &junk, 1, &got, NULL);
             CloseHandle(hf);
         }
@@ -2097,6 +2097,252 @@ static void test_tels_container(void) {
     DeleteFileA(P5);
     DeleteFileA(P6);
     DeleteFileA(P7);
+}
+
+/* ======================================================
+   تست: رمزنگاری کانتینر — CRC و GCM با هم، کلید DPAPI، و عدم نشت متن ساده
+   ====================================================== */
+static uint32_t tels_t_crc32(const uint8_t *p, size_t n, uint32_t crc) {
+    crc = ~crc;
+    for (size_t i = 0; i < n; i++) {
+        crc ^= p[i];
+        for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+    return ~crc;
+}
+
+static void tels_t_put32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t tels_t_get32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static BOOL tels_t_read(const char *path, uint64_t pos, void *buf, size_t n) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return FALSE;
+    BOOL ok = (fseek(f, (long)pos, SEEK_SET) == 0) && (fread(buf, 1, n, f) == n);
+    fclose(f);
+    return ok;
+}
+
+static BOOL tels_t_write(const char *path, uint64_t pos, const void *buf, size_t n) {
+    FILE *f = fopen(path, "r+b");
+    if (!f) return FALSE;
+    BOOL ok = (fseek(f, (long)pos, SEEK_SET) == 0) && (fwrite(buf, 1, n, f) == n);
+    fclose(f);
+    return ok;
+}
+
+/* رکوردهای فایل را از آفست داده‌ها فهرست می‌کند: موقعیت و نوع هر کدام */
+static int tels_t_scan(const char *path, uint64_t *pos_out, uint8_t *kind_out, int max) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fclose(f);
+    int n = 0;
+    uint64_t pos = 12288u;
+    while (n < max && pos + 64u <= (uint64_t)fsize) {
+        uint8_t hdr[64];
+        if (!tels_t_read(path, pos, hdr, sizeof(hdr))) break;
+        if (tels_t_get32(hdr) != 0x4345524Cu) break;
+        uint32_t plen = tels_t_get32(hdr + 20);
+        if (pos + 64u + plen > (uint64_t)fsize) break;
+        pos_out[n] = pos;
+        kind_out[n] = hdr[8];
+        n++;
+        pos += 64u + plen;
+    }
+    return n;
+}
+
+static void test_tels_encryption(void) {
+    SECTION("Container encryption: GCM with CRC, DPAPI key protection, no plaintext leaks");
+
+    /* ۱) متن ساده در فایل نیست و کانتینر با کلید DPAPI دوباره باز می‌شود */
+    const char *PS = "tels_test_secret.tels";
+    DeleteFileA(PS);
+    TelsContainer *c = tels_open(PS, TRUE);
+    TEST("encrypted container created", c != NULL);
+    if (c) {
+        TelsId f = 0;
+        TEST("entry with a secret name created", tels_create(c, TELS_ROOT, "secretname_xyz.txt", TELS_TYPE_FILE, &f));
+        TEST("secret payload written", tels_write(c, f, 0, "SECRET-PAYLOAD-7F3A9C", 21));
+        TEST("commit", tels_commit(c));
+        tels_close(c);
+    }
+    static uint8_t raw[1 << 16];
+    FILE *fp = fopen(PS, "rb");
+    size_t rn = fp ? fread(raw, 1, sizeof(raw), fp) : 0;
+    if (fp) fclose(fp);
+    TEST("file bytes do not contain the payload", rn > 0 && !bytes_contain((const char *)raw, rn, "SECRET-PAYLOAD"));
+    TEST("file bytes do not contain the entry name", rn > 0 && !bytes_contain((const char *)raw, rn, "secretname_xyz"));
+    c = tels_open(PS, FALSE);
+    TEST("encrypted container reopens with its protected key", c != NULL);
+    if (c) {
+        TelsId f2 = 0;
+        char pb[32] = {0};
+        TEST("verify passes on a clean encrypted container", tels_verify(c));
+        TEST("payload decrypts after reopen",
+             tels_lookup(c, TELS_ROOT, "secretname_xyz.txt", &f2) &&
+             tels_read(c, f2, 0, pb, 21) == 21 && memcmp(pb, "SECRET-PAYLOAD-7F3A9C", 21) == 0);
+        tels_close(c);
+    }
+
+    /* ۲) nonce هر رکورد یکتاست: دو رکورد با متن یکسان، رمز متفاوت دارند */
+    const char *PN = "tels_test_nonce.tels";
+    DeleteFileA(PN);
+    c = tels_open(PN, TRUE);
+    if (c) {
+        TelsId f = 0;
+        tels_create(c, TELS_ROOT, "same.bin", TELS_TYPE_FILE, &f);
+        tels_write(c, f, 0, "SAMEPAYLOAD", 11);
+        tels_write(c, f, 11, "SAMEPAYLOAD", 11);
+        tels_commit(c);
+        tels_close(c);
+    }
+    uint64_t rp[8];
+    uint8_t rk[8];
+    int rcount = tels_t_scan(PN, rp, rk, 8);
+    uint64_t dpos[2];
+    int dcount = 0;
+    for (int i = 0; i < rcount && dcount < 2; i++)
+        if (rk[i] == 1) dpos[dcount++] = rp[i];
+    TEST("two data records found", dcount == 2);
+    if (dcount == 2) {
+        uint8_t h1[64], h2[64], c1[11], c2[11];
+        tels_t_read(PN, dpos[0], h1, 64);
+        tels_t_read(PN, dpos[0] + 64, c1, 11);
+        tels_t_read(PN, dpos[1], h2, 64);
+        tels_t_read(PN, dpos[1] + 64, c2, 11);
+        TEST("nonces of identical payloads differ", memcmp(h1 + 32, h2 + 32, 12) != 0);
+        TEST("ciphertexts of identical payloads differ", memcmp(c1, c2, 11) != 0);
+    }
+
+    /* ۳) دست‌کاری با CRC معتبر: GCM باید رد کند و داده‌ی دست‌کاری‌شده برنگردد */
+    const char *PT = "tels_test_tamper.tels";
+    DeleteFileA(PT);
+    c = tels_open(PT, TRUE);
+    if (c) {
+        TelsId t = 0;
+        tels_create(c, TELS_ROOT, "t.bin", TELS_TYPE_FILE, &t);
+        tels_write(c, t, 0, "ABCDEFGH", 8);
+        tels_commit(c);
+        tels_close(c);
+    }
+    uint64_t tp[8];
+    uint8_t tk[8];
+    int tcount = tels_t_scan(PT, tp, tk, 8);
+    int tdata = -1;
+    for (int i = 0; i < tcount; i++)
+        if (tk[i] == 1) { tdata = i; break; }
+    TEST("tamper target record found", tdata >= 0);
+    if (tdata >= 0) {
+        uint64_t rec = tp[tdata];
+        uint8_t hdr[64], body[8];
+        tels_t_read(PT, rec, hdr, sizeof(hdr));
+        tels_t_read(PT, rec + 64, body, sizeof(body));
+        body[2] ^= 0x01;
+        uint32_t crc = tels_t_crc32(hdr, 60, 0);
+        crc = tels_t_crc32(body, sizeof(body), crc);
+        tels_t_put32(hdr + 60, crc);
+        tels_t_write(PT, rec, hdr, sizeof(hdr));
+        tels_t_write(PT, rec + 64, body, sizeof(body));
+    }
+    c = tels_open(PT, FALSE);
+    TEST("container opens; the tampered record is rejected", c != NULL);
+    if (c) {
+        TelsId tf = 0;
+        TEST("file created before the tampered record survives", tels_lookup(c, TELS_ROOT, "t.bin", &tf));
+        char vb[16] = {0};
+        TEST("reading the tampered data fails authentication", tels_read(c, tf, 0, vb, 8) == -1);
+        TEST("tels_verify reports the tampering", !tels_verify(c));
+        tels_close(c);
+    }
+
+    /* ۳ب) رکوردی که بعد از آخرین commit است و دست‌کاری شده: replay باید GCM را بررسی کند */
+    const char *PU = "tels_test_replay.tels";
+    DeleteFileA(PU);
+    c = tels_open(PU, TRUE);
+    if (c) {
+        TelsId u = 0;
+        tels_create(c, TELS_ROOT, "u.bin", TELS_TYPE_FILE, &u);
+        tels_commit(c);
+        tels_write(c, u, 0, "IJKLMNOP", 8);
+        tels_abort(c);
+    }
+    uint64_t up[8];
+    uint8_t uk[8];
+    int ucount = tels_t_scan(PU, up, uk, 8);
+    int udata = -1;
+    for (int i = 0; i < ucount; i++)
+        if (uk[i] == 1) { udata = i; break; }
+    TEST("replay target record found", udata >= 0);
+    if (udata >= 0) {
+        uint64_t rec = up[udata];
+        uint8_t hdr[64], body[8];
+        tels_t_read(PU, rec, hdr, sizeof(hdr));
+        tels_t_read(PU, rec + 64, body, sizeof(body));
+        body[5] ^= 0x10;
+        uint32_t crc = tels_t_crc32(hdr, 60, 0);
+        crc = tels_t_crc32(body, sizeof(body), crc);
+        tels_t_put32(hdr + 60, crc);
+        tels_t_write(PU, rec, hdr, sizeof(hdr));
+        tels_t_write(PU, rec + 64, body, sizeof(body));
+    }
+    c = tels_open(PU, FALSE);
+    TEST("replay stops at a record that fails authentication", c != NULL);
+    if (c) {
+        TelsId u2 = 0;
+        uint64_t usz = 99;
+        TEST("file survives and its forged data is dropped on replay",
+             tels_lookup(c, TELS_ROOT, "u.bin", &u2) && tels_size(c, u2, &usz) && usz == 0);
+        tels_close(c);
+    }
+    DeleteFileA(PU);
+
+    /* ۴) کلید wrap شده دست‌کاری شود: DPAPI باید باز کردن را رد کند */
+    const char *PK = "tels_test_keytamper.tels";
+    DeleteFileA(PK);
+    c = tels_open(PK, TRUE);
+    if (c) tels_close(c);
+    {
+        uint8_t hdr[64];
+        tels_t_read(PK, 8192u, hdr, sizeof(hdr));
+        uint32_t blen = tels_t_get32(hdr + 20);
+        uint8_t blob[1024];
+        if (blen > 0 && blen <= sizeof(blob)) {
+            tels_t_read(PK, 8192u + 64u, blob, blen);
+            blob[20] ^= 0x01;
+            uint32_t crc = tels_t_crc32(hdr, 60, 0);
+            crc = tels_t_crc32(blob, blen, crc);
+            tels_t_put32(hdr + 60, crc);
+            tels_t_write(PK, 8192u, hdr, sizeof(hdr));
+            tels_t_write(PK, 8192u + 64u, blob, blen);
+        }
+    }
+    c = tels_open(PK, FALSE);
+    TEST("a tampered key blob is rejected by DPAPI", c == NULL);
+    if (c) tels_close(c);
+
+    /* ۵) فایلی که کانتینر نیست رد شود */
+    const char *PG = "tels_test_garbage.tels";
+    {
+        uint8_t junk[20000];
+        memset(junk, 0xAB, sizeof(junk));
+        FILE *g = fopen(PG, "wb");
+        if (g) { fwrite(junk, 1, sizeof(junk), g); fclose(g); }
+    }
+    TEST("a file that is not a container is rejected", tels_open(PG, FALSE) == NULL);
+
+    DeleteFileA(PS);
+    DeleteFileA(PN);
+    DeleteFileA(PT);
+    DeleteFileA(PK);
+    DeleteFileA(PG);
 }
 
 static void test_crash_report(void) {
@@ -3650,6 +3896,7 @@ int main(void) {
     test_ftp_download();
     test_url_credentials();
     test_tels_container();
+    test_tels_encryption();
     test_launch_retry_backoff();
     test_permanent_vs_transient_errors();
     test_http_extract_host();

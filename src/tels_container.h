@@ -7,6 +7,10 @@
    بازیابی: superblock معتبر جدیدتر، index آن، و replay رکوردهای معتبر بعدی.
    رکورد نیمه‌نوشته‌ی انتهای فایل دور ریخته می‌شود. هر رکورد CRC32 دارد.
 
+   رمزنگاری: هر رکورد با AES-256-GCM (BCrypt) رمز می‌شود و CRC32 روی بایت‌های دیسک
+   خرابی تصادفی را جدا از دست‌کاری تشخیص می‌دهد. کلید ۲۵۶ بیتی با DPAPI wrap
+   می‌شود و فقط برای همین کاربر و همین دستگاه باز می‌شود.
+
    thread-safe است: همه‌ی عملیات با یک critical section محافظت می‌شوند. */
 #ifndef LASS_TELS_CONTAINER_H
 #define LASS_TELS_CONTAINER_H
@@ -41,6 +45,8 @@ BOOL     tels_write(TelsContainer *c, TelsId id, uint64_t offset, const void *bu
 /* >0 بایت خوانده‌شده، 0 در پایان، -1 خطا */
 int32_t  tels_read(TelsContainer *c, TelsId id, uint64_t offset, void *buf, uint32_t len);
 BOOL     tels_size(TelsContainer *c, TelsId id, uint64_t *size_out);
+/* همه‌ی داده‌ها را بازخوانی و احراز می‌کند؛ FALSE یعنی خرابی یا دست‌کاری پیدا شد */
+BOOL     tels_verify(TelsContainer *c);
 /* حذف entry همراه با تمام زیرمجموعه‌ها */
 BOOL     tels_delete(TelsContainer *c, TelsId id);
 uint32_t tels_list(TelsContainer *c, TelsId parent, TelsId *out, uint32_t cap);
