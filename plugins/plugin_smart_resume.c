@@ -25,6 +25,9 @@
 /* ======================================================
    ثابت‌ها
    ====================================================== */
+#include "lass_store.h"
+
+#define SR_STORE_DIR "states"
 #define SR_MAGIC    0x53524944u   /* 'IDRS' */
 #define SR_VERSION  2
 #define SR_MAX_SEGS 32
@@ -104,14 +107,14 @@ static void xor_crypt(void *data, size_t len, const uint8_t key[8]) {
    پس state_dir باید حداکثر MAX_PATH-26 باشه */
 #define SR_SUFFIX_LEN  25   /* \sr_0123456789abcdef.dat */
 
+/* نام entry در container (نه مسیر فایل): sr_<hash(url) xor hash(out_path)> */
 static void make_state_path(SR_Priv *priv, const char *url,
                              const char *out_path, char *out, int max) {
+    (void)priv;
+    if (max <= 0) return;
+    if (!url || !out_path) { out[0] = '\0'; return; }
     uint64_t h = fnv1a_64(url) ^ fnv1a_64(out_path);
-    int dir_max = max - SR_SUFFIX_LEN - 1;
-    if (dir_max <= 0) { out[0] = '\0'; return; }
-    /* محدود کردن طول state_dir تا جای کافی بماند */
-    snprintf(out, (size_t)max, "%.*s\\sr_%016llx.dat",
-             dir_max, priv->state_dir, (unsigned long long)h);
+    snprintf(out, (size_t)max, "sr_%016llx", (unsigned long long)h);
 }
 
 /* ======================================================
@@ -175,12 +178,15 @@ static void sr_save(SR_Priv *priv, IDM_Download *dl) {
     memcpy(segs_enc, segs, seg_sz);
     xor_crypt(segs_enc, seg_sz, priv->xor_key);
 
-    /* ── نوشتن فایل ── */
-    FILE *f = fopen(path, "wb");
-    if (f) {
-        fwrite(&hdr_enc,  sizeof(hdr_enc),  1, f);
-        fwrite(segs_enc,  seg_sz,            1, f);
-        fclose(f);
+    /* ── نوشتن در container (به‌جای فایل) ── */
+    size_t blob_len = sizeof(hdr_enc) + seg_sz;
+    uint8_t *blob = (uint8_t *)malloc(blob_len);
+    if (blob) {
+        memcpy(blob, &hdr_enc, sizeof(hdr_enc));
+        memcpy(blob + sizeof(hdr_enc), segs_enc, seg_sz);
+        if (!lass_store_put(SR_STORE_DIR, path, blob, (uint32_t)blob_len))
+            LOGW(LOG_MOD_SMARTRESUME, "state could not be written to the store");
+        free(blob);
     }
 
     free(segs_enc);
@@ -196,26 +202,26 @@ static bool sr_load(SR_Priv *priv, IDM_Download *dl) {
     char path[IDM_MAX_PATH];
     make_state_path(priv, dl->url, dl->out_path, path, sizeof(path));
 
+    uint8_t *blob = NULL;
+    uint32_t blen = 0;
+    if (!lass_store_get(SR_STORE_DIR, path, &blob, &blen))
+        return false;
+
     EnterCriticalSection(&priv->lock);
 
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        LeaveCriticalSection(&priv->lock);
-        return false;
-    }
-
     /* ── خواندن و رمزگشایی هدر ── */
-    SR_Header hdr_enc, hdr;
-    if (fread(&hdr_enc, sizeof(hdr_enc), 1, f) != 1) {
-        fclose(f); LeaveCriticalSection(&priv->lock);
+    if (blen < sizeof(SR_Header)) {
+        free(blob); LeaveCriticalSection(&priv->lock);
         return false;
     }
+    SR_Header hdr_enc, hdr;
+    memcpy(&hdr_enc, blob, sizeof(hdr_enc));
     memcpy(&hdr, &hdr_enc, sizeof(hdr));
     xor_crypt(&hdr, sizeof(hdr), priv->xor_key);
 
     /* ── اعتبارسنجی ── */
     if (hdr.magic != SR_MAGIC || hdr.version != SR_VERSION) {
-        fclose(f); LeaveCriticalSection(&priv->lock);
+        free(blob); LeaveCriticalSection(&priv->lock);
         return false;
     }
 
@@ -226,13 +232,13 @@ static bool sr_load(SR_Priv *priv, IDM_Download *dl) {
     hdr.checksum = saved_crc;
     if (calc_crc != saved_crc) {
         LOGW(LOG_MOD_SMARTRESUME, "Header CRC mismatch - state corrupt");
-        fclose(f); LeaveCriticalSection(&priv->lock);
+        free(blob); LeaveCriticalSection(&priv->lock);
         return false;
     }
 
     /* URL باید match کنه */
     if (strcmp(hdr.url, dl->url) != 0) {
-        fclose(f); LeaveCriticalSection(&priv->lock);
+        free(blob); LeaveCriticalSection(&priv->lock);
         return false;
     }
 
@@ -240,28 +246,28 @@ static bool sr_load(SR_Priv *priv, IDM_Download *dl) {
     uint64_t expected_sig = hdr.total_size ^ 0x9e3779b97f4a7c15ULL;
     if (hdr.size_sig != expected_sig) {
         LOGW(LOG_MOD_SMARTRESUME, "Size signature mismatch - file changed");
-        fclose(f); LeaveCriticalSection(&priv->lock);
+        free(blob); LeaveCriticalSection(&priv->lock);
         return false;
     }
 
     /* ── خواندن segment‌ها ── */
     uint16_t nseg = hdr.num_segments;
     if (nseg == 0 || nseg > SR_MAX_SEGS) {
-        fclose(f); LeaveCriticalSection(&priv->lock);
+        free(blob); LeaveCriticalSection(&priv->lock);
         return false;
     }
-
     size_t seg_sz = sizeof(SR_SegState) * nseg;
+    if ((size_t)blen != sizeof(SR_Header) + seg_sz) {
+        free(blob); LeaveCriticalSection(&priv->lock);
+        return false;
+    }
     uint8_t *buf = (uint8_t *)malloc(seg_sz);
     if (!buf) {
-        fclose(f); LeaveCriticalSection(&priv->lock);
+        free(blob); LeaveCriticalSection(&priv->lock);
         return false;
     }
-    if (fread(buf, seg_sz, 1, f) != 1) {
-        free(buf); fclose(f); LeaveCriticalSection(&priv->lock);
-        return false;
-    }
-    fclose(f);
+    memcpy(buf, blob + sizeof(SR_Header), seg_sz);
+    free(blob);
 
     xor_crypt(buf, seg_sz, priv->xor_key);
     SR_SegState *segs = (SR_SegState *)buf;
@@ -315,7 +321,7 @@ static bool sr_load(SR_Priv *priv, IDM_Download *dl) {
 static void sr_delete(SR_Priv *priv, const char *url, const char *out_path) {
     char path[IDM_MAX_PATH];
     make_state_path(priv, url, out_path, path, sizeof(path));
-    DeleteFileA(path);
+    lass_store_delete(SR_STORE_DIR, path);
 }
 
 /* ======================================================
@@ -394,6 +400,47 @@ IDM_PluginHooks *g_sr_plugin_instance = NULL;
 /* ======================================================
    Public API
    ====================================================== */
+/* مهاجرت یک‌باره: فایل‌های sr_*.dat پوشه‌ی قدیمی در container کپی می‌شوند.
+   فایل‌ها دست‌نخورده می‌مانند؛ اگر نامشان در container هست، کپی نمی‌شوند. */
+static void sr_migrate_legacy_folder(const char *dir) {
+    if (!dir || !dir[0]) return;
+    size_t dlen = strlen(dir);
+    char pattern[IDM_MAX_PATH];
+    if (dlen + 12 >= sizeof(pattern)) return;
+    memcpy(pattern, dir, dlen);
+    memcpy(pattern + dlen, "\\sr_*.dat", 10);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        size_t fl = strlen(fd.cFileName);
+        if (fl <= 4 || fl - 4 > 63) continue;
+        char name[64];
+        memcpy(name, fd.cFileName, fl - 4);
+        name[fl - 4] = '\0';
+        if (lass_store_exists(SR_STORE_DIR, name)) continue;
+        char full[IDM_MAX_PATH];
+        if (dlen + 1 + fl + 1 > sizeof(full)) continue;
+        memcpy(full, dir, dlen);
+        full[dlen] = '\\';
+        memcpy(full + dlen + 1, fd.cFileName, fl + 1);
+        FILE *f = fopen(full, "rb");
+        if (!f) continue;
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (sz > 0 && sz <= (1L << 20)) {
+            uint8_t *b = (uint8_t *)malloc((size_t)sz);
+            if (b && fread(b, 1, (size_t)sz, f) == (size_t)sz)
+                lass_store_put(SR_STORE_DIR, name, b, (uint32_t)sz);
+            free(b);
+        }
+        fclose(f);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
 IDM_PluginHooks *smart_resume_plugin_create(const char *state_dir,
                                              const uint8_t xor_key[8]) {
     SR_Priv *priv = (SR_Priv *)calloc(1, sizeof(*priv));
@@ -423,6 +470,8 @@ IDM_PluginHooks *smart_resume_plugin_create(const char *state_dir,
         else
             strcpy(priv->state_dir, ".\\lass_states");
     }
+
+    sr_migrate_legacy_folder(priv->state_dir);
 
     if (xor_key)
         memcpy(priv->xor_key, xor_key, 8);
@@ -471,7 +520,7 @@ bool smart_resume_exists(IDM_PluginHooks *plugin,
     SR_Priv *priv = (SR_Priv *)plugin->priv;
     char path[IDM_MAX_PATH];
     make_state_path(priv, url, out_path, path, sizeof(path));
-    return (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES);
+    return lass_store_exists(SR_STORE_DIR, path);
 }
 
 void smart_resume_delete(IDM_PluginHooks *plugin,

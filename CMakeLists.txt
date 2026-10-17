@@ -24,6 +24,7 @@ set(SRC_FILES
     src/transport.c
     src/url_secure.c
     src/tels_container.c
+    src/lass_store.c
     src/i18n.c)
 
 set(PLUGIN_FILES

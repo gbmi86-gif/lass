@@ -64,6 +64,7 @@
 #include "../plugins/plugin_ftp.h"
 #include "test_ftpd.h"
 #include "../src/queue_persist.h"
+#include "../src/lass_store.h"
 #include "../src/settings.h"
 #include "../src/i18n.h"
 #include "../src/http.h"
@@ -384,6 +385,9 @@ static void test_cookie_jar(void) {
    ====================================================== */
 static void test_smart_resume(void) {
     SECTION("Smart Resume Plugin");
+    lass_store_close();
+    DeleteFileA("tels_test_sr_store.tels");
+    lass_store_open("tels_test_sr_store.tels");
 
     /* پوشه temp برای state */
     char tmp_dir[MAX_PATH];
@@ -477,6 +481,8 @@ static void test_smart_resume(void) {
 
     smart_resume_plugin_destroy(plug);
     TEST("smart_resume destroy", true);
+    lass_store_close();
+    DeleteFileA("tels_test_sr_store.tels");
 
     /* حذف پوشه temp */
     RemoveDirectoryA(tmp_dir);
@@ -1678,6 +1684,9 @@ static BOOL bytes_contain(const char *data, size_t n, const char *needle) {
 
 static void test_url_credentials(void) {
     SECTION("URL credentials: split, redact, protected queue and version 1 compatibility");
+    lass_store_close();
+    DeleteFileA("tels_test_cred_store.tels");
+    lass_store_open("tels_test_cred_store.tels");
     char clean[IDM_MAX_URL] = {0};
     char pass[128] = {0};
     BOOL ok = url_split_credentials("ftp://alice:s3cret@127.0.0.1:21/a.bin", clean, sizeof(clean), pass, sizeof(pass));
@@ -1708,24 +1717,30 @@ static void test_url_credentials(void) {
         TEST("password is held only in encrypted form", dl->pass_enc[0] != '\0' && strstr(dl->pass_enc, "s3cret") == NULL);
     }
 
-    const char *qpath = "queue_cred_test.dat";
-    TEST("queue saved", eng && queue_persist_save(eng, qpath));
+    TEST("queue saved", eng && queue_persist_save(eng));
     {
-        static char qb[1 << 16];
-        FILE *f = fopen(qpath, "rb");
-        size_t n = f ? fread(qb, 1, sizeof(qb), f) : 0;
-        if (f) fclose(f);
-        TEST("queue file contains no plain password", n > 0 && !bytes_contain(qb, n, "s3cret"));
-        TEST("queue file contains no password in URL form", !bytes_contain(qb, n, "alice:s3cret"));
+        static uint8_t qb[1 << 16];
+        uint8_t *blob = NULL;
+        uint32_t n = 0;
+        BOOL have = lass_store_get("queue", "state", &blob, &n) && n > 0 && n <= sizeof(qb);
+        if (have) memcpy(qb, blob, n);
+        free(blob);
+        TEST("stored queue is readable", have);
+        TEST("stored queue contains no plain password", have && !bytes_contain((const char *)qb, n, "s3cret"));
+        TEST("stored queue contains no password in URL form", have && !bytes_contain((const char *)qb, n, "alice:s3cret"));
     }
 
     IDM_Engine *eng2 = engine_create(NULL);
-    TEST("queue restored into a new engine", eng2 && queue_persist_load(eng2, qpath));
+    TEST("queue restored into a new engine", eng2 && queue_persist_load(eng2, NULL));
     IDM_Download *rdl = (eng2 && eng2->queue_head) ? eng2->queue_head : NULL;
     TEST("restored download gets its connection password back", rdl && strstr(rdl->secret_url, "s3cret") != NULL);
     TEST("restored download URL stays password-free", rdl && strstr(rdl->url, "s3cret") == NULL);
 
     /* صف نسخه‌ی ۱ (بدون فیلد رمز) باید همچنان خوانده شود */
+    /* مهاجرت: فروشگاه تازه و خالی باشد تا صف نسخه‌ی ۱ از فایل قدیمی خوانده شود */
+    lass_store_close();
+    DeleteFileA("tels_test_cred_store.tels");
+    lass_store_open("tels_test_cred_store.tels");
     const char *v1path = "queue_v1_test.dat";
     {
         typedef struct { uint32_t magic; uint16_t version; uint16_t pad; uint32_t count; uint32_t pad2; } V1Hdr;
@@ -1751,7 +1766,8 @@ static void test_url_credentials(void) {
     if (eng) engine_destroy(eng);
     if (eng2) engine_destroy(eng2);
     if (eng3) engine_destroy(eng3);
-    DeleteFileA(qpath);
+    lass_store_close();
+    DeleteFileA("tels_test_cred_store.tels");
     DeleteFileA(v1path);
     DeleteFileA("q_cred_test.bin");
     DeleteFileA("v1_test.bin");
@@ -2345,6 +2361,144 @@ static void test_tels_encryption(void) {
     DeleteFileA(PG);
 }
 
+/* ======================================================
+   تست: لبه‌های API کانتینر — بافر نام و اندازه‌ی خواندن
+   ====================================================== */
+static void test_tels_api_edges(void) {
+    SECTION("Container API edges: name buffers and read sizes");
+    const char *P = "tels_test_edges.tels";
+    DeleteFileA(P);
+    TelsContainer *c = tels_open(P, TRUE);
+    TEST("edges container created", c != NULL);
+    if (!c) return;
+
+    TelsId id = 0;
+    tels_create(c, TELS_ROOT, "long_name_example.txt", TELS_TYPE_FILE, &id);
+
+    char small[8];
+    memset(small, 'Z', sizeof(small));
+    TelsType t = (TelsType)0;
+    TelsId par = 0;
+    TEST("tels_info refuses a name that does not fit", !tels_info(c, id, &t, &par, small, sizeof(small)));
+    TEST("tels_info leaves a too-small buffer untouched", small[0] == 'Z' && small[7] == 'Z');
+
+    char full[64];
+    memset(full, 0, sizeof(full));
+    TEST("tels_info copies a name that fits",
+         tels_info(c, id, &t, &par, full, sizeof(full)) && strcmp(full, "long_name_example.txt") == 0);
+
+    tels_write(c, id, 0, "abc", 3);
+    char rb[8];
+    memset(rb, 0, sizeof(rb));
+    TEST("tels_read of zero bytes returns 0", tels_read(c, id, 0, rb, 0) == 0);
+    TEST("tels_read past the end returns 0", tels_read(c, id, 100, rb, 4) == 0);
+    TEST("tels_read returns only the bytes available",
+         tels_read(c, id, 0, rb, 8) == 3 && memcmp(rb, "abc", 3) == 0);
+
+    tels_abort(c);
+    DeleteFileA(P);
+}
+
+/* ======================================================
+   تست: فروشگاه lass — نسل‌ها، مقدار بزرگ، و ماندگاری
+   ====================================================== */
+static void test_lass_store(void) {
+    SECTION("Lass store (generations, large values, durability)");
+    const char *SP = "tels_test_store.tels";
+    lass_store_close();
+    DeleteFileA(SP);
+    TEST("store opens a new file", lass_store_open(SP));
+    TEST("missing value does not exist", !lass_store_exists("a/b", "k"));
+    TEST("put creates a value", lass_store_put("a/b", "k", "first", 5));
+    TEST("value exists after put", lass_store_exists("a/b", "k"));
+
+    uint8_t *got = NULL;
+    uint32_t glen = 0;
+    TEST("get returns the value",
+         lass_store_get("a/b", "k", &got, &glen) && glen == 5 && memcmp(got, "first", 5) == 0);
+    free(got);
+    got = NULL;
+
+    TEST("second put replaces the value", lass_store_put("a/b", "k", "second!", 7));
+    TEST("get returns the newest generation",
+         lass_store_get("a/b", "k", &got, &glen) && glen == 7 && memcmp(got, "second!", 7) == 0);
+    free(got);
+    got = NULL;
+
+    static uint8_t big[9u * 1024u * 1024u];
+    for (size_t i = 0; i < sizeof(big); i++) big[i] = (uint8_t)(i * 13u + 7u);
+    TEST("large value (spans several chunks) is stored",
+         lass_store_put("big", "blob", big, (uint32_t)sizeof(big)));
+    TEST("large value reads back exactly",
+         lass_store_get("big", "blob", &got, &glen) && glen == sizeof(big) && memcmp(got, big, sizeof(big)) == 0);
+    free(got);
+    got = NULL;
+
+    TEST("delete removes the value", lass_store_delete("a/b", "k") && !lass_store_exists("a/b", "k"));
+    TEST("empty value is stored", lass_store_put("a/b", "empty", NULL, 0));
+    TEST("empty value reads back as length 0",
+         lass_store_get("a/b", "empty", &got, &glen) && glen == 0);
+    free(got);
+    got = NULL;
+
+    TEST("durable value written", lass_store_put("a/b", "keep", "durable", 7));
+    lass_store_close();
+    TEST("store reopens", lass_store_open(SP));
+    TEST("committed value survives reopen",
+         lass_store_get("a/b", "keep", &got, &glen) && glen == 7 && memcmp(got, "durable", 7) == 0);
+    free(got);
+    lass_store_close();
+    DeleteFileA(SP);
+}
+
+/* ======================================================
+   تست: مهاجرت پوشه‌ی قدیمی state ها به فروشگاه (یک‌بار، بدون بازنویسی)
+   ====================================================== */
+static void test_state_migration(void) {
+    SECTION("Smart Resume: legacy state folder migrates into the store");
+    lass_store_close();
+    DeleteFileA("tels_test_mig_store.tels");
+    TEST("migration store opens", lass_store_open("tels_test_mig_store.tels"));
+
+    const char *DIR = "tels_test_legacy_states";
+    const char *legacy_file = "tels_test_legacy_states\\sr_00112233aabbccdd.dat";
+    CreateDirectoryA(DIR, NULL);
+    uint8_t first[96];
+    for (size_t i = 0; i < sizeof(first); i++) first[i] = (uint8_t)(i * 7u + 1u);
+    FILE *f = fopen(legacy_file, "wb");
+    if (f) { fwrite(first, 1, sizeof(first), f); fclose(f); }
+
+    uint8_t k8[8] = {0x5A, 0x13, 0x77, 0x21, 0x09, 0xC4, 0x3E, 0x88};
+    IDM_PluginHooks *plug = smart_resume_plugin_create(DIR, k8);
+    TEST("plugin created over a legacy folder", plug != NULL);
+
+    uint8_t *got = NULL;
+    uint32_t glen = 0;
+    TEST("legacy state imported into the store",
+         lass_store_get("states", "sr_00112233aabbccdd", &got, &glen) &&
+         glen == sizeof(first) && memcmp(got, first, sizeof(first)) == 0);
+    free(got);
+    got = NULL;
+
+    /* بار دوم: مقدار موجود در فروشگاه نباید با فایل قدیمی بازنویسی شود */
+    uint8_t changed[96];
+    memset(changed, 0xEE, sizeof(changed));
+    f = fopen(legacy_file, "wb");
+    if (f) { fwrite(changed, 1, sizeof(changed), f); fclose(f); }
+    if (plug) smart_resume_plugin_destroy(plug);
+    plug = smart_resume_plugin_create(DIR, k8);
+    TEST("second import keeps the stored value",
+         lass_store_get("states", "sr_00112233aabbccdd", &got, &glen) &&
+         glen == sizeof(first) && memcmp(got, first, sizeof(first)) == 0);
+    free(got);
+    if (plug) smart_resume_plugin_destroy(plug);
+
+    DeleteFileA(legacy_file);
+    RemoveDirectoryA(DIR);
+    lass_store_close();
+    DeleteFileA("tels_test_mig_store.tels");
+}
+
 static void test_crash_report(void) {
     SECTION("Crash Report (fault location + call stack)");
 
@@ -2575,45 +2729,54 @@ static void test_tels_long_path(void) {
 static void test_queue_persist(void) {
     SECTION("Queue Persist (session restore)");
 
-    /* یه فایل موقت برای تست */
-    char tmp_path[MAX_PATH];
-    GetTempPathA(MAX_PATH, tmp_path);
-    strncat(tmp_path, "lass_test_queue.dat", MAX_PATH - strlen(tmp_path) - 1);
-    DeleteFileA(tmp_path); /* پاک کن اگه از قبل بود */
+    /* فروشگاه موقت برای این تست */
+    lass_store_close();
+    DeleteFileA("tels_test_queue_store.tels");
+    TEST("queue store opens", lass_store_open("tels_test_queue_store.tels"));
 
     /* ── ساخت engine با چند دانلود ── */
     IDM_Engine *eng = engine_create(NULL);
+    TEST("engine create", eng != NULL);
+    if (!eng) {
+        lass_store_close();
+        DeleteFileA("tels_test_queue_store.tels");
+        return;
+    }
     eng->max_concurrent = 0; /* auto-launch نشه */
-    TEST("engine create",       eng != NULL);
-    if (!eng) return;
 
     engine_add(eng, "http://example.com/a.zip", "C:\\Downloads\\a.zip", 4, 0);
     engine_add(eng, "http://example.com/b.mp4", "C:\\Downloads\\b.mp4", 8, 0);
     engine_add(eng, "http://example.com/c.pdf", "C:\\Downloads\\c.pdf", 2, 0);
 
-    /* ── save ── */
-    BOOL saved = queue_persist_save(eng, tmp_path);
-    TEST("save returns TRUE",     saved);
-    TEST("queue.dat created",
-        GetFileAttributesA(tmp_path) != INVALID_FILE_ATTRIBUTES);
+    /* ── save در فروشگاه ── */
+    BOOL saved = queue_persist_save(eng);
+    TEST("save returns TRUE", saved);
+    TEST("queue is stored in the container", lass_store_exists("queue", "state"));
 
-    /* بررسی سایز فایل */
-    HANDLE hf = CreateFileA(tmp_path, GENERIC_READ, FILE_SHARE_READ,
-                             NULL, OPEN_EXISTING, 0, NULL);
-    DWORD fsz = hf != INVALID_HANDLE_VALUE ? GetFileSize(hf, NULL) : 0;
-    if (hf != INVALID_HANDLE_VALUE) CloseHandle(hf);
-    TEST("file has content",      fsz > sizeof(uint32_t) * 3);
+    uint8_t *qb = NULL;
+    uint32_t qlen = 0;
+    BOOL got_blob = lass_store_get("queue", "state", &qb, &qlen);
+    TEST("stored queue has a header and records", got_blob && qlen > sizeof(uint32_t) * 3);
+    free(qb);
 
     engine_destroy(eng);
 
+    /* ماندگاری: فروشگاه بسته و دوباره باز شود، صف باید همان‌جا باشد */
+    lass_store_close();
+    TEST("store reopens for the queue", lass_store_open("tels_test_queue_store.tels"));
+
     /* ── load در یه engine جدید ── */
     IDM_Engine *eng2 = engine_create(NULL);
+    TEST("engine2 create", eng2 != NULL);
+    if (!eng2) {
+        lass_store_close();
+        DeleteFileA("tels_test_queue_store.tels");
+        return;
+    }
     eng2->max_concurrent = 0;
-    TEST("engine2 create",        eng2 != NULL);
-    if (!eng2) { DeleteFileA(tmp_path); return; }
 
-    BOOL loaded = queue_persist_load(eng2, tmp_path);
-    TEST("load returns TRUE",     loaded);
+    BOOL loaded = queue_persist_load(eng2, NULL);
+    TEST("load returns TRUE", loaded);
 
     /* شمارش دانلودهای بازیابی‌شده */
     int cnt = 0;
@@ -2624,7 +2787,7 @@ static void test_queue_persist(void) {
         if (dl->state != DL_PAUSED) states_paused = FALSE;
     }
     LeaveCriticalSection(&eng2->lock);
-    TEST("3 downloads restored",  cnt == 3);
+    TEST("3 downloads restored", cnt == 3);
     TEST("all restored as PAUSED", states_paused);
 
     /* بررسی URL اولین دانلود */
@@ -2633,16 +2796,16 @@ static void test_queue_persist(void) {
     if (eng2->queue_head)
         url_ok = (strstr(eng2->queue_head->url, "example.com") != NULL);
     LeaveCriticalSection(&eng2->lock);
-    TEST("url preserved",         url_ok);
+    TEST("url preserved", url_ok);
 
     /* null safety */
-    TEST("save null safe",        !queue_persist_save(NULL, tmp_path));
-    TEST("save null path safe",   !queue_persist_save(eng2, NULL));
-    TEST("load null safe",        !queue_persist_load(NULL, tmp_path));
+    TEST("save null safe", !queue_persist_save(NULL));
+    TEST("load null safe", !queue_persist_load(NULL, NULL));
 
     engine_destroy(eng2);
-    DeleteFileA(tmp_path);
-    TEST("engine destroy",        TRUE);
+    lass_store_close();
+    DeleteFileA("tels_test_queue_store.tels");
+    TEST("engine destroy", TRUE);
 }
 
 /* ======================================================
@@ -3897,6 +4060,9 @@ int main(void) {
     test_url_credentials();
     test_tels_container();
     test_tels_encryption();
+    test_tels_api_edges();
+    test_lass_store();
+    test_state_migration();
     test_launch_retry_backoff();
     test_permanent_vs_transient_errors();
     test_http_extract_host();

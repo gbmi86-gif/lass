@@ -23,6 +23,7 @@
 #include "../src/segment.h"
 #include "../src/types.h"
 #include "../src/queue_persist.h"
+#include "../src/lass_store.h"
 #include "../plugins/plugins_setup.h"
 #include "../plugins/plugin_clipboard.h"
 #include "../plugins/plugin_basket.h"
@@ -230,7 +231,7 @@ static void core_on_engine_msg(LDM_Core *core, UINT msg,
             LeaveCriticalSection(&core->engine->lock);
             char qp[MAX_PATH];
             queue_persist_get_path(qp, sizeof(qp));
-            queue_persist_save(core->engine, qp);
+            queue_persist_save(core->engine);
             EnterCriticalSection(&core->engine->lock);
         }
     }
@@ -353,6 +354,7 @@ LDM_Core *core_create(HWND notify_hwnd) {
        مجبور بود NULL به plugins_shutdown بده — که به‌خاطر گارد
        `if (!reg) return;` داخل خودش، عملاً کل تابع رو no-op
        می‌کرد. حالا واقعاً نگه‌ش می‌داریم. */
+    lass_store_open_default();
     core->plugin_registry = plugins_init();
 
     /* بارگذاری queue از آخرین session — اگه queue.dat وجود داشت
@@ -388,6 +390,7 @@ void core_destroy(LDM_Core *core) {
     if (core->msg_hwnd) DestroyWindow(core->msg_hwnd);
     DeleteCriticalSection(&core->lock);
     g_core_inst = NULL;
+    lass_store_close();
     free(core);
     LOGI(LOG_MOD_CORE, "destroyed");
 }
@@ -429,7 +432,7 @@ void core_dispatch(LDM_Core *core, const LDM_Event *evt) {
             engine_set_referer(added, evt->data.add.referer);
         /* ذخیره queue بعد از هر اضافه شدن */
         { char qp[MAX_PATH]; queue_persist_get_path(qp, sizeof(qp));
-          queue_persist_save(core->engine, qp); }
+          queue_persist_save(core->engine); }
         break;
     }
 
@@ -439,14 +442,14 @@ void core_dispatch(LDM_Core *core, const LDM_Event *evt) {
                          b->out_dir, b->segments, 0, b->group_name);
         free(b->urls_newline); /* core مسئول free هستش */
         { char qp[MAX_PATH]; queue_persist_get_path(qp, sizeof(qp));
-          queue_persist_save(core->engine, qp); }
+          queue_persist_save(core->engine); }
         break;
     }
 
     case LDM_EVT_PAUSE:
         engine_pause(core->engine, evt->data.id);
         { char qp[MAX_PATH]; queue_persist_get_path(qp, sizeof(qp));
-          queue_persist_save(core->engine, qp); }
+          queue_persist_save(core->engine); }
         break;
 
     case LDM_EVT_RESUME:
@@ -456,7 +459,7 @@ void core_dispatch(LDM_Core *core, const LDM_Event *evt) {
     case LDM_EVT_CANCEL:
         engine_cancel(core->engine, evt->data.id);
         { char qp[MAX_PATH]; queue_persist_get_path(qp, sizeof(qp));
-          queue_persist_save(core->engine, qp); }
+          queue_persist_save(core->engine); }
         break;
 
     case LDM_EVT_REMOVE: {
@@ -464,7 +467,7 @@ void core_dispatch(LDM_Core *core, const LDM_Event *evt) {
         LDM_Notify n = {.type=LDM_NOTIFY_REMOVED, .id=evt->data.id};
         if (core->notify_cb) core->notify_cb(&n, core->notify_userdata);
         { char qp[MAX_PATH]; queue_persist_get_path(qp, sizeof(qp));
-          queue_persist_save(core->engine, qp); }
+          queue_persist_save(core->engine); }
         break;
     }
 
@@ -475,7 +478,7 @@ void core_dispatch(LDM_Core *core, const LDM_Event *evt) {
             core->notify_cb(&notify, core->notify_userdata);
         }
         { char qp[MAX_PATH]; queue_persist_get_path(qp, sizeof(qp));
-          queue_persist_save(core->engine, qp); }
+          queue_persist_save(core->engine); }
         break;
     }
 

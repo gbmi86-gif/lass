@@ -1,0 +1,24 @@
+v5.0.46: Add lass_store (key-value store over tels_container)
+
+New: src/lass_store.c/h
+- put / get / delete over tels_container
+- Generations (each put creates a new version)
+- Large values (spans several chunks)
+- Durability (committed values survive reopen)
+- Empty values supported
+
+Migrated subsystems to lass_store:
+- queue_persist.c: queue.dat -> lass_store (v1 migration)
+- plugin_smart_resume.c: state folder -> lass_store
+- URL credentials: encrypted queue in lass_store
+- No more plaintext queue.dat
+- core_ldm.c updated to wire lass_store
+
+New tests:
+- Container API edges (name buffers, read sizes)
+- Lass store (generations, large values, durability)
+- Smart Resume legacy migration
+- Queue persist via store
+
+Tests: 725 -> 753 (+28)
+Bump version to 5.0.46

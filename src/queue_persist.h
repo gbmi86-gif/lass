@@ -1,12 +1,10 @@
-/* queue_persist.h — ذخیره و بارگذاری لیست دانلودها
-   هدف: وقتی برنامه بسته یا کرش می‌کنه، بعد از restart
-   لیست دانلودها و وضعیتشون بازیابی بشه.
+/* queue_persist.h — ذخیره و بارگذاری لیست دانلودها روی container .tels
 
-   فرمت فایل queue.dat:
-     [MAGIC: 4 bytes "LASQ"]
-     [VERSION: 2 bytes]
-     [COUNT: 4 bytes]
-     [RECORD: count × sizeof(QueueRecord)]
+   صف داخل فروشگاه برنامه (lass.tels، پوشه‌ی "queue") نگه داشته می‌شود.
+   queue.dat قدیمی فقط برای مهاجرت یک‌باره‌ی صف خوانده می‌شود و دست‌نخورده می‌ماند.
+
+   قالب بلاب صف (همان قالب فایل قدیمی):
+     [MAGIC: 4 bytes "LASQ"] [VERSION: 2 bytes] [COUNT: 4 bytes] [RECORD: count × QueueRecordV2]
 */
 #pragma once
 #ifndef WIN32_LEAN_AND_MEAN
@@ -16,7 +14,7 @@
 #include <stdint.h>
 #include "../src/engine.h"
 
-#define QUEUE_PERSIST_MAGIC   0x5141534Cu  /* "LASQ" */
+#define QUEUE_PERSIST_MAGIC      0x5141534Cu  /* "LASQ" */
 #define QUEUE_PERSIST_VERSION_V1 1
 #define QUEUE_PERSIST_VERSION    2   /* ۲: رکورد + رمز رمزشده‌ی FTP */
 
@@ -38,17 +36,18 @@ typedef struct {
 } QueueRecord;
 
 /* نسخه‌ی ۲: رکورد نسخه‌ی ۱ به‌علاوه‌ی رمز رمزشده با DPAPI (هرگز متن ساده نیست).
-   فایل‌های نسخه‌ی ۱ هم خوانده می‌شوند و رمزی ندارند. */
+   بلاب‌های نسخه‌ی ۱ هم خوانده می‌شوند و رمزی ندارند. */
 typedef struct {
     QueueRecord base;
     char        pass_enc[512];
 } QueueRecordV2;
 
-/* ذخیره کل queue به فایل — بعد از هر تغییر (add/remove/complete) صدا زده میشه */
-BOOL queue_persist_save(IDM_Engine *eng, const char *queue_path);
+/* ذخیره‌ی کل صف در فروشگاه — بعد از هر تغییر (add/remove/complete) صدا زده می‌شود */
+BOOL queue_persist_save(IDM_Engine *eng);
 
-/* بارگذاری queue از فایل — در startup صدا زده میشه */
-BOOL queue_persist_load(IDM_Engine *eng, const char *queue_path);
+/* بارگذاری صف: اول از فروشگاه؛ اگر آنجا صفی نبود، یک‌بار از legacy_path مهاجرت می‌کند.
+   legacy_path می‌تواند NULL باشد. */
+BOOL queue_persist_load(IDM_Engine *eng, const char *legacy_path);
 
-/* مسیر پیش‌فرض: %APPDATA%\Lass\queue.dat */
+/* مسیر فایل قدیمی queue.dat: %APPDATA%\Lass\queue.dat — فقط برای مهاجرت */
 void queue_persist_get_path(char *out, int out_sz);

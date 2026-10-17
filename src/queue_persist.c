@@ -1,17 +1,11 @@
-/* queue_persist.c — ذخیره/بارگذاری لیست دانلودها
-   ─────────────────────────────────────────────────
-   ایده: مثل journaling سیستم‌های فایل — هر بار که
-   وضعیت queue تغییر می‌کنه، یه snapshot کامل به
-   queue.dat نوشته میشه. در startup، این فایل خونده
-   میشه و دانلودهای قبلی بازیابی میشن.
+/* queue_persist.c — ذخیره و بارگذاری صف دانلودها روی container .tels
 
-   چرا snapshot کامل به‌جای append-only log؟
-   - ساده‌تر و reliable‌تر
-   - فایل همیشه consistent هست (نه partially-written)
-   - اگه برق بره بین دو write، در نهایت یا فایل قدیمی
-     کاملاً درست داریم یا فایل جدید کاملاً درست
-   ─────────────────────────────────────────────────
-*/
+   صف داخل فروشگاه برنامه (پوشه‌ی "queue"، نام "state") نگه داشته می‌شود. هر بار که
+   وضعیت صف تغییر می‌کند، یک snapshot کامل جایگزین می‌شود؛ جایگزینی اتمیک است
+   (رجوع کن به lass_store.c).
+
+   queue.dat قدیمی فقط برای مهاجرت یک‌باره خوانده می‌شود، آن هم اگر فروشگاه صفی
+   نداشته باشد. فایل قدیمی دست‌نخورده می‌ماند. */
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -22,9 +16,14 @@
 #include <string.h>
 #include "queue_persist.h"
 #include "engine.h"
+#include "lass_store.h"
 #include "lass_log.h"
 
-/* Header فایل */
+#define QUEUE_STORE_DIR   "queue"
+#define QUEUE_STORE_NAME  "state"
+#define QUEUE_LEGACY_MAX  (16u * 1024u * 1024u)
+
+/* سرآیند بلاب صف؛ همان قالب فایل قدیمی */
 typedef struct {
     uint32_t magic;
     uint16_t version;
@@ -41,25 +40,24 @@ void queue_persist_get_path(char *out, int out_sz) {
         snprintf(out, out_sz, "queue.dat");
 }
 
-BOOL queue_persist_save(IDM_Engine *eng, const char *queue_path) {
-    if (!eng || !queue_path) return FALSE;
+BOOL queue_persist_save(IDM_Engine *eng) {
+    if (!eng) return FALSE;
 
     /* جمع‌آوری رکوردها زیر lock */
     EnterCriticalSection(&eng->lock);
 
-    /* شمارش تعداد */
     uint32_t count = 0;
     for (IDM_Download *dl = eng->queue_head; dl; dl = dl->next)
         count++;
 
-    QueueRecordV2 *records = (QueueRecordV2 *)calloc(count, sizeof(QueueRecordV2));
-    if (!records && count > 0) {
+    QueueRecordV2 *records = (QueueRecordV2 *)calloc(count ? count : 1u, sizeof(QueueRecordV2));
+    if (!records) {
         LeaveCriticalSection(&eng->lock);
         return FALSE;
     }
 
     uint32_t i = 0;
-    for (IDM_Download *dl = eng->queue_head; dl; dl = dl->next, i++) {
+    for (IDM_Download *dl = eng->queue_head; dl && i < count; dl = dl->next, i++) {
         QueueRecord *r = &records[i].base;
         r->id           = dl->id;
         r->total_size   = dl->total_size;
@@ -79,86 +77,69 @@ BOOL queue_persist_save(IDM_Engine *eng, const char *queue_path) {
 
     LeaveCriticalSection(&eng->lock);
 
-    /* نوشتن به یه فایل temp اول (atomic write pattern):
-       - نوشتن به queue.dat.tmp
-       - بعد rename به queue.dat
-       اگه برنامه وسط نوشتن کرش کنه، فایل اصلی دست‌نخورده‌ست */
-    char tmp_path[MAX_PATH];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", queue_path);
-
-    HANDLE hf = CreateFileA(tmp_path,
-                             GENERIC_WRITE, 0, NULL,
-                             CREATE_ALWAYS,
-                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
-                             NULL);
-    if (hf == INVALID_HANDLE_VALUE) {
-        free(records);
-        return FALSE;
-    }
-
-    QueueFileHeader hdr = {0};
+    QueueFileHeader hdr;
+    memset(&hdr, 0, sizeof(hdr));
     hdr.magic   = QUEUE_PERSIST_MAGIC;
     hdr.version = QUEUE_PERSIST_VERSION;
     hdr.count   = count;
 
-    DWORD written;
-    BOOL ok = WriteFile(hf, &hdr, sizeof(hdr), &written, NULL);
-    if (ok && count > 0)
-        ok = WriteFile(hf, records, count * sizeof(QueueRecordV2), &written, NULL);
-
-    FlushFileBuffers(hf);
-    CloseHandle(hf);
+    size_t body  = (size_t)count * sizeof(QueueRecordV2);
+    size_t total = sizeof(hdr) + body;
+    uint8_t *blob = (uint8_t *)malloc(total);
+    if (!blob) {
+        free(records);
+        return FALSE;
+    }
+    memcpy(blob, &hdr, sizeof(hdr));
+    if (count > 0)
+        memcpy(blob + sizeof(hdr), records, body);
     free(records);
 
-    if (!ok) {
-        DeleteFileA(tmp_path);
-        return FALSE;
-    }
-
-    /* atomic rename */
-    MoveFileExA(tmp_path, queue_path, MOVEFILE_REPLACE_EXISTING);
-    return TRUE;
+    BOOL ok = lass_store_put(QUEUE_STORE_DIR, QUEUE_STORE_NAME, blob, (uint32_t)total);
+    free(blob);
+    if (!ok)
+        LOGW(LOG_MOD_QUEUE, "queue: could not write the queue to the store");
+    return ok;
 }
 
-BOOL queue_persist_load(IDM_Engine *eng, const char *queue_path) {
-    if (!eng || !queue_path) return FALSE;
+/* بلاب صف (قالب نسخه‌ی ۱ یا ۲) را parse می‌کند و دانلودها را به engine اضافه می‌کند */
+static BOOL queue_load_buffer(IDM_Engine *eng, const uint8_t *data, size_t len, const char *source) {
+    if (!data || len < sizeof(QueueFileHeader)) return FALSE;
 
-    HANDLE hf = CreateFileA(queue_path,
-                             GENERIC_READ, FILE_SHARE_READ, NULL,
-                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hf == INVALID_HANDLE_VALUE) return FALSE;
-
-    QueueFileHeader hdr = {0};
-    DWORD read_bytes;
-    if (!ReadFile(hf, &hdr, sizeof(hdr), &read_bytes, NULL) ||
-        read_bytes != sizeof(hdr) ||
-        hdr.magic   != QUEUE_PERSIST_MAGIC ||
+    QueueFileHeader hdr;
+    memcpy(&hdr, data, sizeof(hdr));
+    if (hdr.magic != QUEUE_PERSIST_MAGIC ||
         (hdr.version != QUEUE_PERSIST_VERSION && hdr.version != QUEUE_PERSIST_VERSION_V1) ||
-        hdr.count   == 0 ||
-        hdr.count   > 10000) { /* sanity check */
-        CloseHandle(hf);
+        hdr.count == 0 ||
+        hdr.count > 10000) {  /* sanity check */
         return FALSE;
     }
+
+    const uint8_t *body = data + sizeof(hdr);
+    size_t avail = len - sizeof(hdr);
 
     /* نسخه‌ی ۱ رکورد بدون رمز دارد؛ همه به QueueRecordV2 تبدیل می‌شوند */
     QueueRecordV2 *records = (QueueRecordV2 *)calloc(hdr.count, sizeof(QueueRecordV2));
-    if (!records) { CloseHandle(hf); return FALSE; }
+    if (!records) return FALSE;
 
     BOOL ok = FALSE;
     if (hdr.version == QUEUE_PERSIST_VERSION_V1) {
-        DWORD want = (DWORD)(hdr.count * sizeof(QueueRecord));
-        QueueRecord *old = (QueueRecord *)calloc(hdr.count, sizeof(QueueRecord));
-        ok = old && ReadFile(hf, old, want, &read_bytes, NULL) && read_bytes == want;
-        if (ok) {
-            for (uint32_t k = 0; k < hdr.count; k++) records[k].base = old[k];
+        size_t want = (size_t)hdr.count * sizeof(QueueRecord);
+        QueueRecord *old = (avail >= want) ? (QueueRecord *)calloc(hdr.count, sizeof(QueueRecord)) : NULL;
+        if (old) {
+            memcpy(old, body, want);
+            for (uint32_t k = 0; k < hdr.count; k++)
+                records[k].base = old[k];
+            ok = TRUE;
         }
         free(old);
     } else {
-        DWORD want = (DWORD)(hdr.count * sizeof(QueueRecordV2));
-        ok = ReadFile(hf, records, want, &read_bytes, NULL) && read_bytes == want;
+        size_t want = (size_t)hdr.count * sizeof(QueueRecordV2);
+        if (avail >= want) {
+            memcpy(records, body, want);
+            ok = TRUE;
+        }
     }
-    CloseHandle(hf);
-
     if (!ok) {
         free(records);
         return FALSE;
@@ -175,11 +156,7 @@ BOOL queue_persist_load(IDM_Engine *eng, const char *queue_path) {
            - در حالت completed/cancelled/failed/queued/paused باشن */
         if (!r->url[0] || !r->out_path[0]) continue;
 
-        /* چک کن آیا فایل .tels یا فایل نهایی وجود داره */
-        char tels_path[MAX_PATH] = {0};
-        int avail = MAX_PATH - 6;
-        snprintf(tels_path, MAX_PATH, "%.*s.tels", avail, r->out_path);
-
+        /* چک کن آیا فایل نهایی وجود داره */
         BOOL has_final = (GetFileAttributesA(r->out_path) != INVALID_FILE_ATTRIBUTES);
 
         /* تعیین state مناسب برای بازیابی:
@@ -227,7 +204,49 @@ BOOL queue_persist_load(IDM_Engine *eng, const char *queue_path) {
     }
 
     free(records);
-    LOGI(LOG_MOD_QUEUE, "Loaded %u/%u downloads from %s",
-         loaded, hdr.count, queue_path);
+    LOGI(LOG_MOD_QUEUE, "Loaded %u/%u downloads from %s", loaded, hdr.count, source);
     return loaded > 0;
+}
+
+BOOL queue_persist_load(IDM_Engine *eng, const char *legacy_path) {
+    if (!eng) return FALSE;
+
+    uint8_t *blob = NULL;
+    uint32_t blen = 0;
+    if (lass_store_get(QUEUE_STORE_DIR, QUEUE_STORE_NAME, &blob, &blen)) {
+        BOOL loaded = queue_load_buffer(eng, blob, blen, "store");
+        free(blob);
+        return loaded;
+    }
+
+    /* مهاجرت یک‌باره: فروشگاه صف ندارد و فایل قدیمی هست */
+    if (!legacy_path || !legacy_path[0]) return FALSE;
+
+    HANDLE hf = CreateFileA(legacy_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf == INVALID_HANDLE_VALUE) return FALSE;
+
+    LARGE_INTEGER fsz;
+    if (!GetFileSizeEx(hf, &fsz) || fsz.QuadPart <= 0 || fsz.QuadPart > (LONGLONG)QUEUE_LEGACY_MAX) {
+        CloseHandle(hf);
+        return FALSE;
+    }
+    DWORD want = (DWORD)fsz.QuadPart;
+    uint8_t *buf = (uint8_t *)malloc(want);
+    DWORD got = 0;
+    BOOL read_ok = buf && ReadFile(hf, buf, want, &got, NULL) && got == want;
+    CloseHandle(hf);
+    if (!read_ok) {
+        free(buf);
+        return FALSE;
+    }
+
+    BOOL loaded = queue_load_buffer(eng, buf, want, legacy_path);
+    free(buf);
+    if (loaded) {
+        /* بلافاصله در فروشگاه ذخیره کن تا دفعه‌ی بعد از container خوانده شود */
+        queue_persist_save(eng);
+        LOGI(LOG_MOD_QUEUE, "queue migrated from %s into the store", legacy_path);
+    }
+    return loaded;
 }

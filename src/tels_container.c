@@ -975,6 +975,7 @@ int32_t tels_read(TelsContainer *c, TelsId id, uint64_t offset, void *buf, uint3
         } else {
             uint64_t avail = e->size - offset;
             uint32_t want = (uint32_t)min64((uint64_t)len, avail);
+            if (want > 0x7FFFFFFFu) want = 0x7FFFFFFFu;   /* int32_t: خواندن جزئی مانند read(2) */
             uint8_t *out = (uint8_t *)buf;
             memset(out, 0, want);
             result = (int32_t)want;
@@ -1043,12 +1044,15 @@ BOOL tels_info(TelsContainer *c, TelsId id, TelsType *type, TelsId *parent,
     TelsEntry *e = entry_get(c, id);
     BOOL ok = (e != NULL);
     if (ok) {
-        if (type) *type = (TelsType)e->type;
-        if (parent) *parent = e->parent;
-        if (name && name_sz) {
-            size_t n = e->name_len < name_sz - 1 ? e->name_len : name_sz - 1;
-            memcpy(name, e->name, n);
-            name[n] = '\0';
+        if (name && name_sz <= e->name_len) {
+            ok = FALSE;                      /* نام جا نمی‌شود: هیچ خروجی‌ای نوشته نمی‌شود */
+        } else {
+            if (type) *type = (TelsType)e->type;
+            if (parent) *parent = e->parent;
+            if (name) {
+                memcpy(name, e->name, e->name_len);
+                name[e->name_len] = '\0';
+            }
         }
     }
     LeaveCriticalSection(&c->lock);
