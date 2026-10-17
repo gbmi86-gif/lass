@@ -1,0 +1,54 @@
+# ── Build artifacts ──
+*.exe
+*.dll
+*.o
+*.obj
+*.lib
+*.a
+*.so
+*.res
+build/
+build-debug/
+bin/
+obj/
+
+# ── Installer output ──
+installer/output/
+installer/*.exe
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*~
+
+# ── Logs ──
+*.log
+lass.log*
+lass_*.log*
+
+# ── User data ──
+*.ini
+queue.dat
+cookies.txt
+*.tels
+*.idmstate
+
+# ── Test artifacts ──
+test_all.exe
+test_output.txt
+
+# ── OS ──
+Thumbs.db
+Desktop.ini
+
+# ── Backup ──
+*.bak
+*.tmp
+*.old
+
+# ── Commit message temp ──
+commit_msg.txt
+
+# ── Random ──
+segments
