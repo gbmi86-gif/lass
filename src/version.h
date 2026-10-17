@@ -14,12 +14,12 @@
 
 #define LASS_VERSION_MAJOR 5
 #define LASS_VERSION_MINOR 0
-#define LASS_VERSION_PATCH 46
+#define LASS_VERSION_PATCH 47
 
 /* رشته‌ی نمایشی کامل — این چیزیه که در Title bar، About dialog،
    و لاگ‌ها نشون داده میشه */
-#define LASS_VERSION_STRING "5.0.46"
+#define LASS_VERSION_STRING "5.0.47"
 
 /* برای resource.rc که به فرمت عددی جدا (comma-separated) نیاز
    داره برای VERSIONINFO */
-#define LASS_VERSION_RC 5,0,46,0
+#define LASS_VERSION_RC 5,0,47,0

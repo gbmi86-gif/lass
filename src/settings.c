@@ -18,6 +18,7 @@
 
 #include "settings.h"
 #include "lass_log.h"
+#include "lass_paths.h"
 #include "secure_store.h"
 
 /* ======================================================
@@ -53,7 +54,7 @@ static void ini_set_str(const char *ini, const char *sec,
    - Registry: یکپارچگی با Windows، سریع‌تر برای خواندن،
      بازیابی بعد از حذف تصادفی INI
    ====================================================== */
-#define LASS_REG_SETTINGS "Software\\Lass\\Settings"
+#define LASS_REG_SETTINGS lass_reg_settings_key()
 
 static HKEY reg_open_settings(BOOL write_access) {
     HKEY hKey = NULL;
@@ -152,21 +153,20 @@ static void reg_load_all(HKEY hk, LassSettings *s) {
    ====================================================== */
 void settings_get_ini_path(char *out, int out_sz) {
     if (!out || out_sz <= 0) return;
-    char appdata[MAX_PATH] = {0};
+    out[0] = '\0';
 
-    if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata) != S_OK)
-        GetEnvironmentVariableA("APPDATA", appdata, sizeof(appdata));
-    if (!appdata[0]) GetTempPathA(sizeof(appdata), appdata);
-
-    /* بافر بزرگ‌تر از MAX_PATH تا truncation نشه */
+    /* پوشه‌ی داده از lass_paths: %APPDATA%\Lass، یا LASS_DATA_DIR در حالت تست */
     char dir[MAX_PATH * 2] = {0};
-    /* PathCombineA از shlwapi — امن‌تر از snprintf برای path */
-    PathCombineA(dir, appdata, LASS_APP_NAME);
+    if (!lass_data_dir(dir, sizeof(dir))) {
+        /* آخرین راه‌حل: پوشه‌ی موقت، مثل قبل */
+        char tmp[MAX_PATH] = {0};
+        GetTempPathA(sizeof(tmp), tmp);
+        PathCombineA(dir, tmp, LASS_APP_NAME);
+    }
     CreateDirectoryA(dir, NULL);
 
     char full[MAX_PATH * 2] = {0};
     PathCombineA(full, dir, LASS_INI_NAME);
-    /* کپی به out با محدودیت out_sz */
     strncpy(out, full, out_sz - 1);
     out[out_sz - 1] = '\0';
 }

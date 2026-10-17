@@ -26,6 +26,7 @@
    ثابت‌ها
    ====================================================== */
 #include "lass_store.h"
+#include "lass_paths.h"
 
 #define SR_STORE_DIR "states"
 #define SR_MAGIC    0x53524944u   /* 'IDRS' */
@@ -449,26 +450,32 @@ IDM_PluginHooks *smart_resume_plugin_create(const char *state_dir,
     if (state_dir)
         snprintf(priv->state_dir, IDM_MAX_PATH, "%s", state_dir);
     else {
-        /* پیش‌فرض: %APPDATA%\Lass\states
-           appdata معمولاً ~40 کاراکتره، پسوند کوتاه
-           برای اطمینان طول appdata رو محدود می‌کنیم */
-        char appdata[IDM_MAX_PATH] = {0};
-        #define SR_APPDATA_SUFFIX "\\Lass\\states"
-        #define SR_LEGACY_SUFFIX  "\\IDM-Clone\\states"
-        if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata) == S_OK) {
-            int ap_max = IDM_MAX_PATH - (int)sizeof(SR_LEGACY_SUFFIX) - 2;
-            snprintf(priv->state_dir, IDM_MAX_PATH, "%.*s%s",
-                     ap_max, appdata, SR_APPDATA_SUFFIX);
-            /* یک‌بار: فایل‌های .dat نسخه‌ی قدیمی را (اگر در مسیر جدید نیستند)
-               کپی کن تا دانلودهای نیمه‌کاره‌ی قبل از آپدیت قابل ادامه باشند. */
-            char legacy[IDM_MAX_PATH] = {0};
-            snprintf(legacy, IDM_MAX_PATH, "%.*s%s",
-                     ap_max, appdata, SR_LEGACY_SUFFIX);
-            legacy_copy_dat_dir_if_missing(legacy, priv->state_dir);
-
-        }
-        else
+        /* پیش‌فرض: %APPDATA%\Lass\states، یا LASS_DATA_DIR در حالت تست */
+        char dir[IDM_MAX_PATH] = {0};
+        const char *sub = "\\states";
+        size_t sl_ = strlen(sub);
+        if (lass_data_dir(dir, sizeof(dir)) && strlen(dir) + sl_ < IDM_MAX_PATH) {
+            size_t dl = strlen(dir);
+            memcpy(priv->state_dir, dir, dl);
+            memcpy(priv->state_dir + dl, sub, sl_ + 1);
+        } else {
             strcpy(priv->state_dir, ".\\lass_states");
+        }
+
+        /* یک‌بار: فایل‌های .dat نسخه‌ی قدیمی؛ در حالت تست داده‌ی واقعی خوانده نمی‌شود */
+        if (!lass_paths_test_mode()) {
+            char appdata[IDM_MAX_PATH] = {0};
+            const char *legacy_suffix = "\\IDM-Clone\\states";
+            if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata) == S_OK) {
+                size_t al = strlen(appdata), ls = strlen(legacy_suffix);
+                if (al + ls < IDM_MAX_PATH) {
+                    char legacy[IDM_MAX_PATH] = {0};
+                    memcpy(legacy, appdata, al);
+                    memcpy(legacy + al, legacy_suffix, ls + 1);
+                    legacy_copy_dat_dir_if_missing(legacy, priv->state_dir);
+                }
+            }
+        }
     }
 
     sr_migrate_legacy_folder(priv->state_dir);

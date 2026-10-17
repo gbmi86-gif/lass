@@ -529,23 +529,33 @@ void browser_ext_plugin_destroy(IDM_PluginHooks *plug) {
     free(plug);
 }
 
+/* کلید NativeMessagingHosts هر مرورگر؛ در حالت تست زیر Software\LassTest است تا کلید واقعی مرورگر دست نخورد */
+static const char *browser_hosts_key(BrowserType b) {
+    static char bufs[3][256];
+    const char *prod = NULL;
+    int idx = -1;
+    switch (b) {
+    case BROWSER_CHROME:  prod = "Software\\Google\\Chrome\\NativeMessagingHosts";  idx = 0; break;
+    case BROWSER_FIREFOX: prod = "Software\\Mozilla\\NativeMessagingHosts";        idx = 1; break;
+    case BROWSER_EDGE:    prod = "Software\\Microsoft\\Edge\\NativeMessagingHosts"; idx = 2; break;
+    default: return NULL;
+    }
+    bufs[idx][0] = '\0';
+    if (!lass_reg_vendor_path(prod, bufs[idx], sizeof(bufs[idx]))) return NULL;
+    return bufs[idx];
+}
+
 BOOL browser_ext_register(BrowserType browsers) {
     char manifest[MAX_PATH];
     if (!write_manifest(manifest, sizeof(manifest))) return FALSE;
 
     BOOL ok = TRUE;
     if (browsers & BROWSER_CHROME)
-        ok &= reg_set_host(
-            "Software\\Google\\Chrome\\NativeMessagingHosts",
-            manifest);
+        ok &= reg_set_host(browser_hosts_key(BROWSER_CHROME), manifest);
     if (browsers & BROWSER_FIREFOX)
-        ok &= reg_set_host(
-            "Software\\Mozilla\\NativeMessagingHosts",
-            manifest);
+        ok &= reg_set_host(browser_hosts_key(BROWSER_FIREFOX), manifest);
     if (browsers & BROWSER_EDGE)
-        ok &= reg_set_host(
-            "Software\\Microsoft\\Edge\\NativeMessagingHosts",
-            manifest);
+        ok &= reg_set_host(browser_hosts_key(BROWSER_EDGE), manifest);
 
     ext_log("[BrowserExt] registered (browsers=%d): %s\n",
             browsers, ok ? "OK" : "PARTIAL");
@@ -559,7 +569,7 @@ BOOL browser_ext_register(BrowserType browsers) {
     {
         HKEY hk; DWORD disp;
         if (RegCreateKeyExA(HKEY_CURRENT_USER,
-                             "Software\\Lass\\Settings\\BrowserExtension",
+                             lass_reg_browser_ext_key(),
                              0, NULL, 0, KEY_SET_VALUE, NULL,
                              &hk, &disp) == ERROR_SUCCESS) {
             DWORD chrome_v  = (browsers & BROWSER_CHROME)  ? 1 : 0;
@@ -583,19 +593,16 @@ BOOL browser_ext_register(BrowserType browsers) {
 BOOL browser_ext_unregister(BrowserType browsers) {
     BOOL ok = TRUE;
     if (browsers & BROWSER_CHROME)
-        ok &= reg_delete_host(
-            "Software\\Google\\Chrome\\NativeMessagingHosts");
+        ok &= reg_delete_host(browser_hosts_key(BROWSER_CHROME));
     if (browsers & BROWSER_FIREFOX)
-        ok &= reg_delete_host(
-            "Software\\Mozilla\\NativeMessagingHosts");
+        ok &= reg_delete_host(browser_hosts_key(BROWSER_FIREFOX));
     if (browsers & BROWSER_EDGE)
-        ok &= reg_delete_host(
-            "Software\\Microsoft\\Edge\\NativeMessagingHosts");
+        ok &= reg_delete_host(browser_hosts_key(BROWSER_EDGE));
 
     /* پاک کردن tracking در رجیستری Lass */
     HKEY hk;
     if (RegOpenKeyExA(HKEY_CURRENT_USER,
-                       "Software\\Lass\\Settings\\BrowserExtension",
+                       lass_reg_browser_ext_key(),
                        0, KEY_SET_VALUE, &hk) == ERROR_SUCCESS) {
         DWORD zero = 0;
         if (browsers & BROWSER_CHROME)
@@ -614,13 +621,8 @@ BOOL browser_ext_unregister(BrowserType browsers) {
 }
 
 BOOL browser_ext_is_registered(BrowserType browser) {
-    const char *base = NULL;
-    switch (browser) {
-    case BROWSER_CHROME:  base="Software\\Google\\Chrome\\NativeMessagingHosts"; break;
-    case BROWSER_FIREFOX: base="Software\\Mozilla\\NativeMessagingHosts"; break;
-    case BROWSER_EDGE:    base="Software\\Microsoft\\Edge\\NativeMessagingHosts"; break;
-    default: return FALSE;
-    }
+    const char *base = browser_hosts_key(browser);
+    if (!base) return FALSE;
     char full[512];
     snprintf(full, sizeof(full), "%s\\%s", base, LASS_EXT_HOST_NAME);
     HKEY hKey;

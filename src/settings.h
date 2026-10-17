@@ -34,11 +34,12 @@
 #include <windows.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include "lass_paths.h"
 
 #define LASS_APP_NAME    "Lass"
 #define LASS_INI_NAME    "lass.ini"
 #define LASS_REG_RUN     "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
-#define LASS_REG_KEY     "Lass Download Manager"
+#define LASS_REG_KEY     lass_reg_startup_value()
 
 typedef struct {
     /* [General] */

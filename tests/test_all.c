@@ -3269,7 +3269,7 @@ static void test_settings(void) {
         if (RegOpenKeyExA(HKEY_CURRENT_USER,
                           "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
                           0, KEY_SET_VALUE, &hk) == ERROR_SUCCESS) {
-            RegDeleteValueA(hk, "Lass Download Manager");
+            RegDeleteValueA(hk, lass_reg_startup_value());
             RegCloseKey(hk);
         }
     }
@@ -3292,7 +3292,7 @@ static void test_settings(void) {
         if (RegOpenKeyExA(HKEY_CURRENT_USER,
                           "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
                           0, KEY_QUERY_VALUE, &hk) == ERROR_SUCCESS) {
-            ok = (RegQueryValueExA(hk, "Lass Download Manager", NULL, &type,
+            ok = (RegQueryValueExA(hk, lass_reg_startup_value(), NULL, &type,
                                    (BYTE *)val, &sz) == ERROR_SUCCESS);
             RegCloseKey(hk);
         }
@@ -4083,6 +4083,24 @@ static void test_video_sniffer(void) {
    main
    ====================================================== */
 int main(void) {
+    /* داده‌ی تست جدا از داده‌ی واقعی کاربر است: ini، cookies، فروشگاه، رجیستری و استارت به پوشه‌ی موقت می‌روند */
+    {
+        char tmp[MAX_PATH] = {0};
+        char home[MAX_PATH] = {0};
+        if (GetTempPathA(sizeof(tmp), tmp) > 0) {
+            size_t tl = strlen(tmp);
+            if (tl > 0 && tmp[tl - 1] == '\\') tl--;
+            const char *sub = "lass_test_data";
+            size_t sbl = strlen(sub);
+            if (tl + 1 + sbl < sizeof(home)) {
+                memcpy(home, tmp, tl);
+                home[tl] = '\\';
+                memcpy(home + tl + 1, sub, sbl + 1);
+                CreateDirectoryA(home, NULL);
+                SetEnvironmentVariableA("LASS_DATA_DIR", home);
+            }
+        }
+    }
     printf("==========================================\n");
     printf(" Lass Download Manager – Test Suite v5\n");
     printf("==========================================\n");

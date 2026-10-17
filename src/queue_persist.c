@@ -17,6 +17,7 @@
 #include "queue_persist.h"
 #include "engine.h"
 #include "lass_store.h"
+#include "lass_paths.h"
 #include "lass_log.h"
 
 #define QUEUE_STORE_DIR   "queue"
@@ -32,12 +33,17 @@ typedef struct {
     uint32_t _pad2;
 } QueueFileHeader;
 
+
 void queue_persist_get_path(char *out, int out_sz) {
-    char appdata[MAX_PATH] = {0};
-    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata)))
-        snprintf(out, out_sz, "%s\\Lass\\queue.dat", appdata);
-    else
-        snprintf(out, out_sz, "queue.dat");
+    if (!out || out_sz <= 0) return;
+    out[0] = '\0';
+    char dir[MAX_PATH] = {0};
+    if (!lass_data_dir(dir, sizeof(dir))) return;
+    const char *name = "\\queue.dat";
+    size_t dl = strlen(dir), nl = strlen(name);
+    if (dl + nl + 1 > (size_t)out_sz) return;
+    memcpy(out, dir, dl);
+    memcpy(out + dl, name, nl + 1);
 }
 
 BOOL queue_persist_save(IDM_Engine *eng) {

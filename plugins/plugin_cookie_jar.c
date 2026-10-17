@@ -9,6 +9,7 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include "lass_paths.h"
 #include <windows.h>
 #include <shlobj.h>
 #include <stdio.h>
@@ -599,22 +600,31 @@ IDM_PluginHooks *cookie_jar_plugin_create(const char *cookie_file) {
     if (cookie_file) {
         safe_copy(priv->cookie_file, IDM_MAX_PATH, cookie_file);
     } else {
-        char appdata[IDM_MAX_PATH] = {0};
-        #define CJ_SUFFIX         "\\Lass\\cookies.txt"
-        #define CJ_LEGACY_SUFFIX  "\\IDM-Clone\\cookies.txt"
-        if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata) == S_OK) {
-            int ap_max = IDM_MAX_PATH - (int)sizeof(CJ_LEGACY_SUFFIX) - 2;
-            snprintf(priv->cookie_file, IDM_MAX_PATH, "%.*s%s",
-                     ap_max, appdata, CJ_SUFFIX);
-            /* یک‌بار: اگر فایل جدید نیست، کوکی‌های نسخه‌ی قدیمی را کپی کن؛
-               فایل قدیمی دست‌نخورده می‌ماند. */
-            char legacy[IDM_MAX_PATH] = {0};
-            snprintf(legacy, IDM_MAX_PATH, "%.*s%s",
-                     ap_max, appdata, CJ_LEGACY_SUFFIX);
-            legacy_copy_file_if_missing(legacy, priv->cookie_file);
-
+        /* پیش‌فرض: %APPDATA%\Lass\cookies.txt، یا LASS_DATA_DIR در حالت تست */
+        char dir[IDM_MAX_PATH] = {0};
+        const char *fname = "\\cookies.txt";
+        size_t fl = strlen(fname);
+        if (lass_data_dir(dir, sizeof(dir)) && strlen(dir) + fl < IDM_MAX_PATH) {
+            size_t dl = strlen(dir);
+            memcpy(priv->cookie_file, dir, dl);
+            memcpy(priv->cookie_file + dl, fname, fl + 1);
         } else {
             strcpy(priv->cookie_file, ".\\cookies.txt");
+        }
+
+        /* مهاجرت یک‌باره‌ی کوکی‌های نسخه‌ی قدیمی فقط برای کاربر واقعی؛ در حالت تست داده‌ی واقعی خوانده نمی‌شود */
+        if (!lass_paths_test_mode()) {
+            char appdata[IDM_MAX_PATH] = {0};
+            const char *legacy_suffix = "\\IDM-Clone\\cookies.txt";
+            if (SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata) == S_OK) {
+                size_t al = strlen(appdata), ls = strlen(legacy_suffix);
+                if (al + ls < IDM_MAX_PATH) {
+                    char legacy[IDM_MAX_PATH] = {0};
+                    memcpy(legacy, appdata, al);
+                    memcpy(legacy + al, legacy_suffix, ls + 1);
+                    legacy_copy_file_if_missing(legacy, priv->cookie_file);
+                }
+            }
         }
     }
 

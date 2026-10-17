@@ -12,6 +12,7 @@
 #include "lass_store.h"
 #include "tels_container.h"
 #include "lass_log.h"
+#include "lass_paths.h"
 
 #define STORE_CHUNK      (4u * 1024u * 1024u)
 #define STORE_GEN_DIGITS 20u
@@ -120,15 +121,13 @@ BOOL lass_store_open(const char *path) {
     return TRUE;
 }
 
+
 BOOL lass_store_open_default(void) {
-    char appdata[MAX_PATH] = {0};
     char dir[MAX_PATH] = {0};
     char path[MAX_PATH] = {0};
-    if (FAILED(SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appdata)))
+    if (!lass_data_dir(dir, sizeof(dir)))   /* %APPDATA%\Lass، یا LASS_DATA_DIR در تست */
         return FALSE;
-    if (!path_join(dir, sizeof(dir), appdata, "\\Lass"))
-        return FALSE;
-    CreateDirectoryA(dir, NULL);   /* اگر از قبل باشد، خطا مهم نیست */
+    CreateDirectoryA(dir, NULL);             /* اگر از قبل باشد، خطا مهم نیست */
     if (!path_join(path, sizeof(path), dir, "\\lass.tels"))
         return FALSE;
     return lass_store_open(path);

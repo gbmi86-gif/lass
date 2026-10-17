@@ -27,13 +27,14 @@
 #define LASS_PLUGIN_BROWSER_EXT_H
 
 #include "plugin_api.h"
+#include "lass_paths.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define LASS_EXT_HOST_NAME  "com.lass.downloadmanager"
-#define LASS_PIPE_NAME      "\\\\.\\pipe\\LassNativeHost"
+#define LASS_PIPE_NAME      lass_pipe_name()
 
 typedef enum {
     BROWSER_NONE    = 0,
