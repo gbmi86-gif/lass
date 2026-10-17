@@ -488,6 +488,9 @@ fail:
    این یعنی حتی اگه launch_thread_impl زودتر از موعد return کنه
    (fail شدن discovery، shutdown engine، و غیره)، unregister
    همیشه تضمین‌شده اجرا میشه. */
+static void engine_release(IDM_Engine *eng);
+static void engine_free_final(IDM_Engine *eng);
+
 static DWORD WINAPI launch_thread(LPVOID param) {
     int brake_id = shutdown_brake_register("download_launch");
     /* ctx در launch_thread_impl آزاد می‌شود؛ قبلش eng و dl را برمی‌داریم */
@@ -497,6 +500,7 @@ static DWORD WINAPI launch_thread(LPVOID param) {
     DWORD result = launch_thread_impl(param);
     engine_dl_release(eng, dl);       /* busy گرفته‌شده در dispatch_launch */
     shutdown_brake_unregister(brake_id);
+    engine_release(eng);   /* ref مربوط به همین thread */
     return result;
 }
 
@@ -519,9 +523,11 @@ static void dispatch_launch(IDM_Engine *eng, IDM_Download *dl) {
     eng->active_count++;
     dl->busy++;                       /* thread launch تا پایان کارش این دانلود را نگه می‌دارد */
 
+    InterlockedIncrement(&eng->refs);   /* این thread تا پایان کارش eng را زنده نگه می‌دارد */
     HANDLE t = CreateThread(NULL, 0, launch_thread, ctx, 0, NULL);
     if (!t) {
         free(ctx);
+        InterlockedDecrement(&eng->refs);
         dl->state = DL_FAILED;
         eng->active_count--;
         dl->busy--;
@@ -626,7 +632,15 @@ static void auto_retry_failed_segs(IDM_Download *dl, uint32_t max_retries) {
     }
 }
 
+static DWORD WINAPI scheduler_thread_impl(LPVOID param);
 static DWORD WINAPI scheduler_thread(LPVOID param) {
+    IDM_Engine *eng = (IDM_Engine *)param;
+    DWORD r = scheduler_thread_impl(param);
+    engine_release(eng);   /* ref مربوط به scheduler */
+    return r;
+}
+
+static DWORD WINAPI scheduler_thread_impl(LPVOID param) {
     IDM_Engine *eng = (IDM_Engine *)param;
 
     /* ثبت‌نام در ترمز خروج — این scheduler اولین چیزیه که با
@@ -776,6 +790,7 @@ IDM_Engine *engine_create(HWND notify_hwnd) {
     IDM_Engine *eng = (IDM_Engine *)calloc(1, sizeof(*eng));
     if (!eng) return NULL;
 
+    eng->refs = 2;   /* یک ref صاحب و یک ref برای scheduler_thread */
     eng->max_concurrent = 5;
     eng->notify_hwnd    = notify_hwnd;
     eng->shutdown       = false;
@@ -793,39 +808,36 @@ void engine_signal_shutdown(IDM_Engine *eng) {
     SetEvent(eng->wake_event);
 }
 
+/* ── تخریب engine ───────────────────────────────────────────────
+   engine با refcount زنده می‌ماند: یک ref مال صاحب (engine_create)، یک ref مال
+   scheduler_thread، و یک ref به ازای هر launch_thread زنده. engine_destroy فقط
+   shutdown را اعلام می‌کند و ref صاحب را آزاد می‌کند؛ هیچ انتظاری روی شبکه نداریم.
+   دلیلش این است که WinINet ممکن است چند ده ثانیه بلاک بماند و لغو امن آن از بیرون
+   قبلاً use-after-free ساخته بود (رجوع کن به http.c). آخرین ref که آزاد شود
+   engine_free_final را صدا می‌زند؛ پس نه use-after-free داریم و نه leak. */
 void engine_destroy(IDM_Engine *eng) {
     if (!eng) return;
 
     engine_signal_shutdown(eng);
-    WaitForSingleObject(eng->scheduler, 5000);
+    WaitForSingleObject(eng->scheduler, 5000);   /* scheduler با wake_event زود برمی‌گردد */
     CloseHandle(eng->scheduler);
     CloseHandle(eng->wake_event);
 
-    /* صبر برای تمام launch_thread های در حال اجرا — این thread ها
-       از eng و dl دسترسی دارن. */
-    DWORD wait_start = GetTickCount();
-    while (eng->active_count > 0 &&
-           (GetTickCount() - wait_start) < 5000) {
-        Sleep(50);
-    }
+    if (eng->active_count > 0)
+        LOGI(LOG_MOD_ENGINE,
+             "engine_destroy: %u launch thread(s) still running; the engine is freed when the last one finishes",
+             eng->active_count);
 
-    if (eng->active_count > 0) {
-        /* یه یا چند launch_thread هنوز زنده‌ن و مستقیم به eng/dl
-           (و eng->lock) دسترسی دارن. آزاد کردن eng، هر dl، یا حتی
-           خود eng->lock الان یعنی use-after-free تضمین‌شده — این
-           دقیقاً همون crash‌ای بود که در تست دیدیم (launch thread
-           برای "x.com/f.zip" بعد از timeout جواب گرفت، درحالی‌که
-           engine_destroy قبلاً بدون توجه به این warning، eng/dl رو
-           آزاد کرده بود). کل eng (به‌همراه صف دانلودهاش) رو عمداً
-           leak می‌کنیم؛ در برنامه‌ی واقعی این فقط موقع بستن برنامه
-           اتفاق می‌افته که OS به‌هرحال کل حافظه رو پس می‌گیره. */
-        LOGE(LOG_MOD_ENGINE,
-             "engine_destroy: %d launch thread(s) still active after "
-             "5s — leaking entire engine (queue+downloads) instead of "
-             "freeing, to avoid use-after-free", eng->active_count);
-        return;
-    }
+    engine_release(eng);   /* ref صاحب */
+}
 
+static void engine_release(IDM_Engine *eng) {
+    if (InterlockedDecrement(&eng->refs) == 0)
+        engine_free_final(eng);
+}
+
+/* آزادسازی نهایی: فقط وقتی هیچ thread ای eng یا dl را نگه نداشته */
+static void engine_free_final(IDM_Engine *eng) {
     EnterCriticalSection(&eng->lock);
     IDM_Download *dl = eng->queue_head;
     while (dl) {

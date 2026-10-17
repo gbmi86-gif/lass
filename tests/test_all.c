@@ -1,3 +1,4 @@
+#include <winsock2.h>
 /* test_all.c
    ─────────────────────────────────────────────────────────────
    Lass Download Manager – Test Suite  v5.1
@@ -2499,6 +2500,58 @@ static void test_state_migration(void) {
     DeleteFileA("tels_test_mig_store.tels");
 }
 
+/* ======================================================
+   تست: تخریب engine وقتی launch_thread وسط شبکه بلاک است — بدون leak و بدون انتظار طولانی
+   ====================================================== */
+static DWORD WINAPI stall_server_proc(LPVOID p) {
+    SOCKET ls = (SOCKET)(UINT_PTR)p;
+    SOCKET c = accept(ls, NULL, NULL);
+    if (c != INVALID_SOCKET) {
+        Sleep(20000);          /* هیچ‌وقت جواب نمی‌دهد */
+        closesocket(c);
+    }
+    closesocket(ls);
+    return 0;
+}
+
+static void test_engine_destroy_while_launching(void) {
+    SECTION("engine_destroy during a blocked launch: no leak, no long wait");
+    WSADATA wd;
+    WSAStartup(MAKEWORD(2, 2), &wd);
+    SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = htons(18477);
+    BOOL listening = (ls != INVALID_SOCKET) &&
+                     bind(ls, (struct sockaddr *)&sa, sizeof(sa)) == 0 &&
+                     listen(ls, 4) == 0;
+    TEST("stall server listening", listening);
+    if (!listening) {
+        if (ls != INVALID_SOCKET) closesocket(ls);
+        return;
+    }
+    HANDLE th = CreateThread(NULL, 0, stall_server_proc, (LPVOID)(UINT_PTR)ls, 0, NULL);
+
+    IDM_Engine *eng = engine_create(NULL);
+    IDM_Download *dl = eng ? engine_add(eng, "http://127.0.0.1:18477/stall.bin", "stall_test.bin", 1, 1) : NULL;
+    TEST("download added and launched", dl != NULL);
+    Sleep(800);
+    TEST("a launch thread is blocked at destroy time", eng && eng->active_count > 0);
+
+    DWORD t0 = GetTickCount();
+    engine_destroy(eng);
+    DWORD spent = GetTickCount() - t0;
+    TEST("engine_destroy returns without waiting for the network", spent < 2000);
+
+    if (th) {
+        WaitForSingleObject(th, 25000);
+        CloseHandle(th);
+    }
+    DeleteFileA("stall_test.bin");
+}
+
 static void test_crash_report(void) {
     SECTION("Crash Report (fault location + call stack)");
 
@@ -4063,6 +4116,7 @@ int main(void) {
     test_tels_api_edges();
     test_lass_store();
     test_state_migration();
+    test_engine_destroy_while_launching();
     test_launch_retry_backoff();
     test_permanent_vs_transient_errors();
     test_http_extract_host();

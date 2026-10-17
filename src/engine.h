@@ -125,6 +125,7 @@ struct IDM_Engine {
     uint32_t         next_id;
     uint32_t         max_concurrent;
     uint32_t         active_count;
+    volatile LONG    refs;          /* refcount: صاحب + scheduler + هر launch_thread زنده */
 
     HANDLE           scheduler;     /* background thread */
     HANDLE           wake_event;    /* SetEvent to wake scheduler */
