@@ -475,21 +475,25 @@ IDM_PluginHooks *browser_ext_plugin_create(ExtDownloadCb on_download,
     return plug;
 }
 
+/* ConnectNamedPipe فقط با یک client برمی‌گرده. اگه اتصال ساختگی درست در فاصله‌ی دو instance
+   شکست بخوره، server بدون client می‌مونه و تا آخر عمر پروسه روی pipe زنده می‌مونه (یه thread قدیمی).
+   پس تا وقتی thread تمام نشده (یا مهلت گذشته) اتصال را تکرار می‌کنیم. */
+static BOOL server_wake_and_wait(BExt_Priv *p, DWORD timeout_ms) {
+    DWORD start = GetTickCount();
+    for (;;) {
+        if (!p->server_thread) return TRUE;
+        if (WaitForSingleObject(p->server_thread, 20) != WAIT_TIMEOUT) return TRUE;
+        if (GetTickCount() - start >= timeout_ms) return FALSE;
+        HANDLE d = CreateFileA(LASS_PIPE_NAME, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (d != INVALID_HANDLE_VALUE) CloseHandle(d);
+    }
+}
+
 void browser_ext_plugin_signal_stop(IDM_PluginHooks *plug) {
     if (!plug || !plug->priv) return;
     BExt_Priv *p = (BExt_Priv *)plug->priv;
     p->running = FALSE;
-    /* دقیقاً همون trick داخل browser_ext_plugin_destroy: بدون این،
-       server_thread داخل ConnectNamedPipe بلاک می‌مونه و priv->running
-       رو هیچ‌وقت نمی‌بینه، چون فقط بعد از برگشتن از این تابع چک
-       می‌شه. یه dummy client وصل می‌کنیم تا فوراً برگرده. امنه که
-       این‌جا هم صدا زده بشه و هم بعداً در browser_ext_plugin_destroy
-       (اگه اون‌موقع دیگه pipeای برای وصل شدن نباشه، CreateFileA
-       ساده fail می‌شه و بی‌اثره). */
-    HANDLE dummy = CreateFileA(LASS_PIPE_NAME,
-                                GENERIC_WRITE, 0, NULL,
-                                OPEN_EXISTING, 0, NULL);
-    if (dummy != INVALID_HANDLE_VALUE) CloseHandle(dummy);
+    server_wake_and_wait(p, 1000);   /* کوتاه؛ destroy بعداً کامل منتظر می‌ماند */
 }
 
 void browser_ext_plugin_destroy(IDM_PluginHooks *plug) {
@@ -497,20 +501,18 @@ void browser_ext_plugin_destroy(IDM_PluginHooks *plug) {
     BExt_Priv *p = (BExt_Priv *)plug->priv;
     if (p) {
         p->running = FALSE;
-        /* یه connection dummy برای خروج از ConnectNamedPipe */
-        HANDLE dummy = CreateFileA(LASS_PIPE_NAME,
-                                    GENERIC_WRITE, 0, NULL,
-                                    OPEN_EXISTING, 0, NULL);
-        if (dummy != INVALID_HANDLE_VALUE) CloseHandle(dummy);
 
-        WaitForSingleObject(p->server_thread, 3000);
+        /* server_thread باید واقعاً تمام شود. اگه نشد، priv را آزاد نمی‌کنیم: thread هنوز به آن دسترسی دارد
+           و آزاد کردنش یعنی use-after-free. */
+        if (!server_wake_and_wait(p, 3000)) {
+            ext_log("[BrowserExt] server thread still running at destroy; plugin state kept alive\n");
+            free(plug);
+            return;
+        }
         CloseHandle(p->server_thread);
 
-        /* منتظر exit واقعی OS-level تمام client thread ها —
-           client_count==0 کافی نیست چون قبل از return 0 اتفاق
-           می‌افته و thread هنوز روی stack خودشه. بدون این wait،
-           ممکنه free(p) بشه ولی thread هنوز از heap استفاده کنه
-           (دقیقاً علت crash های intermittent بعد از ext_destroy) */
+        /* منتظر exit واقعی OS-level تمام client thread ها — client_count==0 کافی نیست، چون قبل از return 0
+           اتفاق می‌افته و thread هنوز روی stack خودشه. */
         EnterCriticalSection(&p->handles_lock);
         int n = p->client_handle_count;
         HANDLE snapshot[EXT_MAX_CLIENTS];

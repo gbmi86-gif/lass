@@ -3761,6 +3761,7 @@ static void test_browser_ext(void) {
            می‌گفت «هیچ‌وقت نرسید» درحالی‌که در واقع خیلی زود رسیده
            بود. */
         long msgs_before = browser_ext_messages_received(plug);
+        LONG fires_before = g_ext_fires;   /* قبل از فرستادن پیام؛ وگرنه callback سریع قبل از نمونه‌برداری می‌رسه */
 
         const char *dl_msg = "{\"action\":\"download\","
                               "\"url\":\"http://example.com/test.zip\","
@@ -3784,7 +3785,6 @@ static void test_browser_ext(void) {
            چندثانیه‌ای که جاهای دیگه‌ی همین suite هم دیده شده). ۳
            ثانیه برای این واقعیت کافی نبود؛ ۸ ثانیه با margin
            واقعی هماهنگه. */
-        LONG fires_before = g_ext_fires;
         DWORD dstart = GetTickCount();
         while (g_ext_fires == fires_before && (GetTickCount() - dstart) < 8000)
             Sleep(20);
@@ -3834,6 +3834,8 @@ static void test_browser_ext(void) {
     TEST("null safety",             TRUE);
 
     browser_ext_plugin_destroy(plug);
+    /* بعد از destroy هیچ server ای نباید روی pipe مانده باشه؛ وگرنه اتصال بعدی به thread قدیمی می‌خوره */
+    TEST("no pipe server left after destroy", !WaitNamedPipeA(LASS_PIPE_NAME, 200));
     TEST("ext destroy",             TRUE);
     /* کوتاه صبر کن تا OS scheduler فرصت کنه هر thread باقیمانده‌ای
        (server_thread یا client_thread) رو کاملاً exit کنه قبل از
