@@ -4,10 +4,6 @@ A fast, plugin-based download manager for Windows — built from scratch with Wi
 
 ![Lass Download Manager Screenshot](https://github.com/gbmi86-gif/lass/raw/main/screenshot.png)
 
-*(اگر اسم فایل عکست چیز دیگری است، کلمه `screenshot.png` در خط بالا را به اسم فایل خودت تغییر بده. اگر عکس در پوشه‌ای مثل images است، آدرس را به `.../raw/main/images/اسم-عکس.png` تغییر بده)*
-
----
-
 ## ✨ Features
 - **Multi-segment:** Up to 16 parallel connections.
 - **Resume:** Resume interrupted downloads.
