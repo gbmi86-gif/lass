@@ -1,6 +1,31 @@
 <img width="1114" height="743" alt="Screenshot 2026-10-18 123512" src="https://github.com/user-attachments/assets/b728a3a2-dcf2-426f-948e-75d2a1c4b574" />
 # Lass Download Manager v5
+## ✨ Features
+- **Multi-segment:** Up to 16 parallel connections.
+- **Resume:** Resume interrupted downloads.
+- **Segment Park:** Pauses a segment after 10 retries without progress.
+- **Retry-After:** Respects server requests.
+- **FTP:** Independent WinSock with REST support.
+- **Streaming:** HLS / DASH / RTMP (native).
+- **Video Sniffer:** YouTube, Aparat, Instagram, Twitter, Vimeo.
+- **Browser Extension:** Chrome / Firefox / Edge.
+- **Cookie Jar:** RFC 6265 compliant.
+- **Proxy:** HTTP / SOCKS4 / SOCKS5.
+- **HTTP Auth:** Basic / Digest.
+- **Speed Scheduler:** Hourly speed limits.
+- **Speed Graph:** Visualized with GDI.
+- **Categories:** Video, Audio, Document, Software, Image.
+- **Extras:** Clipboard Monitor, Download Basket, Notifications (toast + tray), Persian + English UI (i18n).
 
+## 🛡️ Security
+- **AES-GCM encryption:** For `.tels` container.
+- **DPAPI:** For keys (user + machine bound).
+- **URL credentials protection:** Split / redact / encrypted store.
+- **Filename sanitization:** Path traversal / illegal chars.
+- **Content-Length validation:** DoS protection.
+- **Command injection protection:** Prevents malicious execution.
+- **Integer overflow checks:** Safe memory handling.
+- **Test isolation:** `lass_paths` ensures the real profile remains untouched.
 دانلود منیجر سریع برای ویندوز — ساخته‌شده با Win32 و WinINet، بدون هیچ dependency خارجی.
 
 A fast, plugin-based download manager for Windows — built from scratch with Win32 and WinINet.
