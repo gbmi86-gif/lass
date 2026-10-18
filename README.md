@@ -90,3 +90,13 @@ Lass/
 ├── CMakeLists.txt
 ├── LICENSE              ← GPL-3.0
 └── README.md
+
+
+🔨 Building
+Requirements: MinGW-w64 (MSYS2 or winlibs)
+
+Method 1: CMake
+
+bash
+cmake -S . -B build -G "MinGW Makefiles"
+cmake --build build
