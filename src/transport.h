@@ -21,6 +21,8 @@ IDM_Result dl_discover(const char *url, const char *referer,
                        struct IDM_Download *dl, HTTP_DiscoveryInfo *out);
 /* بازه‌ی شامل [start, end] (end=0 یعنی تا انتها) */
 DlStream  *dl_stream_open_range(struct IDM_Download *dl, uint64_t start, uint64_t end);
+DlStream  *dl_stream_open_range_info(struct IDM_Download *dl, uint64_t start, uint64_t end,
+                                             uint32_t *retry_after_out);
 /* >0 بایت، 0 پایان، <0 خطا */
 int        dl_stream_read(DlStream *s, void *buf, int buf_size);
 BOOL       dl_stream_got_partial(const DlStream *s);

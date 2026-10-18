@@ -2630,7 +2630,7 @@ static void test_segment_policy_parks_stuck_range(void) {
         if (st == DL_FAILED || st == DL_COMPLETED) break;
     }
     TEST("download stops once every segment is parked", st == DL_FAILED);
-    TEST("the stop reason says why", strstr(reason, "without progress") != NULL &&
+    TEST("the stop reason says why", strstr(reason, "no progress") != NULL &&
                                      strstr(reason, "ignored the range") != NULL);
 
     engine_destroy(eng);
@@ -2639,8 +2639,134 @@ static void test_segment_policy_parks_stuck_range(void) {
         WaitForSingleObject(th, 5000);
         CloseHandle(th);
     }
+    TEST("the stop reason counts all 10 attempts", strstr(reason, "(10 attempts") != NULL);
     DeleteFileA("policy_test.bin");
     DeleteFileA("policy_test.bin.tels");
+}
+
+/* ======================================================
+   تست: Retry-After برای بخش‌ها — دو درخواست اول 429 با Retry-After، بعد Range درست
+   ====================================================== */
+#define RETRY_BODY_SIZE (8u * 1024u * 1024u)
+static volatile LONG g_retry_429_served = 0;
+
+static DWORD WINAPI retry_after_server(LPVOID p) {
+    SOCKET ls = (SOCKET)(UINT_PTR)p;
+    static LONG gets_seen = 0;
+    for (;;) {
+        SOCKET c = accept(ls, NULL, NULL);
+        if (c == INVALID_SOCKET) break;
+        char req[2048];
+        int got = recv(c, req, (int)sizeof(req) - 1, 0);
+        if (got > 0) {
+            req[got] = '\0';
+            if (strncmp(req, "HEAD", 4) == 0) {
+                char hdr[256];
+                int hl = snprintf(hdr, sizeof(hdr),
+                    "HTTP/1.1 200 OK\r\nContent-Length: %u\r\nAccept-Ranges: bytes\r\n"
+                    "ETag: \"retry\"\r\nConnection: close\r\n\r\n", (unsigned)RETRY_BODY_SIZE);
+                send(c, hdr, hl, 0);
+            } else {
+                LONG n = InterlockedIncrement(&gets_seen);
+                if (n <= 2) {
+                    InterlockedIncrement(&g_retry_429_served);
+                    static const char r429[] =
+                        "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\n"
+                        "Content-Length: 0\r\nConnection: close\r\n\r\n";
+                    send(c, r429, (int)(sizeof(r429) - 1), 0);
+                } else {
+                    unsigned long long s = 0, e = RETRY_BODY_SIZE - 1ull;
+                    const char *rp = strstr(req, "Range: bytes=");
+                    if (rp) {
+                        rp += 13;
+                        s = strtoull(rp, NULL, 10);
+                        const char *dash = strchr(rp, '-');
+                        if (dash && dash[1] >= '0' && dash[1] <= '9')
+                            e = strtoull(dash + 1, NULL, 10);
+                    }
+                    if (e >= RETRY_BODY_SIZE) e = RETRY_BODY_SIZE - 1ull;
+                    unsigned long long len = e - s + 1ull;
+                    char hdr[320];
+                    int hl = snprintf(hdr, sizeof(hdr),
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: %llu\r\n"
+                        "Content-Range: bytes %llu-%llu/%u\r\nAccept-Ranges: bytes\r\n"
+                        "ETag: \"retry\"\r\nConnection: close\r\n\r\n",
+                        len, s, e, (unsigned)RETRY_BODY_SIZE);
+                    send(c, hdr, hl, 0);
+                    static char zeros[65536];
+                    unsigned long long sent = 0;
+                    while (sent < len) {
+                        unsigned long long left = len - sent;
+                        int chunk = (int)(left < sizeof(zeros) ? left : sizeof(zeros));
+                        int r = send(c, zeros, chunk, 0);
+                        if (r <= 0) break;
+                        sent += (unsigned long long)r;
+                    }
+                }
+            }
+        }
+        closesocket(c);
+    }
+    return 0;
+}
+
+static void test_segment_honours_retry_after(void) {
+    SECTION("Segments honour Retry-After from the server and then finish the download");
+    WSADATA wd;
+    WSAStartup(MAKEWORD(2, 2), &wd);
+    SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = htons(18479);
+    BOOL ok = (ls != INVALID_SOCKET) &&
+              bind(ls, (struct sockaddr *)&sa, sizeof(sa)) == 0 &&
+              listen(ls, 8) == 0;
+    TEST("retry-after server listening", ok);
+    if (!ok) {
+        if (ls != INVALID_SOCKET) closesocket(ls);
+        return;
+    }
+    InterlockedExchange(&g_retry_429_served, 0);
+    HANDLE th = CreateThread(NULL, 0, retry_after_server, (LPVOID)(UINT_PTR)ls, 0, NULL);
+
+    IDM_Engine *eng = engine_create(NULL);
+    IDM_Download *dl = eng ? engine_add(eng, "http://127.0.0.1:18479/retry.bin", "retry_after_test.bin", 2, 1) : NULL;
+    TEST("download added", dl != NULL);
+
+    DL_State st = DL_QUEUED;
+    int waited = 0;
+    while (dl && waited < 40000) {
+        Sleep(250);
+        waited += 250;
+        EnterCriticalSection(&eng->lock);
+        st = dl->state;
+        LeaveCriticalSection(&eng->lock);
+        if (st == DL_COMPLETED || st == DL_FAILED) break;
+    }
+    TEST("the server really sent Retry-After", g_retry_429_served >= 1);
+    TEST("download completes after the wait", st == DL_COMPLETED);
+
+    HANDLE hf = CreateFileA("retry_after_test.bin", GENERIC_READ, FILE_SHARE_READ, NULL,
+                            OPEN_EXISTING, 0, NULL);
+    LARGE_INTEGER fsz;
+    fsz.QuadPart = 0;
+    BOOL sized = FALSE;
+    if (hf != INVALID_HANDLE_VALUE) {
+        sized = GetFileSizeEx(hf, &fsz);
+        CloseHandle(hf);
+    }
+    TEST("final file has the full size", sized && (unsigned long long)fsz.QuadPart == RETRY_BODY_SIZE);
+
+    engine_destroy(eng);
+    closesocket(ls);
+    if (th) {
+        WaitForSingleObject(th, 5000);
+        CloseHandle(th);
+    }
+    DeleteFileA("retry_after_test.bin");
+    DeleteFileA("retry_after_test.bin.tels");
 }
 
 static void test_crash_report(void) {
@@ -4228,6 +4354,7 @@ int main(void) {
     test_state_migration();
     test_engine_destroy_while_launching();
     test_segment_policy_parks_stuck_range();
+    test_segment_honours_retry_after();
     test_launch_retry_backoff();
     test_permanent_vs_transient_errors();
     test_http_extract_host();

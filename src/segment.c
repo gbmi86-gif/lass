@@ -56,7 +56,8 @@ static DWORD WINAPI seg_worker(LPVOID param) {
 
 retry:
     /* Respect speed limit: checked per-chunk in the read loop */
-    DlStream *conn = dl_stream_open_range(dl, seg->current, seg->end);
+    uint32_t retry_after = 0;
+    DlStream *conn = dl_stream_open_range_info(dl, seg->current, seg->end, &retry_after);
     if (!conn) {
         /* Back-off and retry */
         EnterCriticalSection(&seg->lock);
@@ -69,6 +70,13 @@ retry:
         }
         DWORD delay = 2000u * (1u << (seg->retry_count - 1)); /* 2s, 4s, 8s... */
         if (delay > 60000) delay = 60000;
+        /* گفتگو، نه دیکته: اگه سرور صراحتاً Retry-After فرستاده، همونو رعایت می‌کنیم (سقف ۵ دقیقه) */
+        if (retry_after > 0) {
+            delay = retry_after * 1000u;
+            if (delay > 300000u) delay = 300000u;
+            LOGI(LOG_MOD_SEGMENT, "[Segment #%u] server asked to wait %lu s (Retry-After)",
+                 seg->id, (unsigned long)retry_after);
+        }
         seg->state     = SEG_RETRYING;
         seg->retry_until = GetTickCount() + delay;
         LeaveCriticalSection(&seg->lock);
@@ -390,6 +398,11 @@ void seg_resume(IDM_Segment *seg) {
              "[Segment #%u] refusing to resume a zombie segment", seg->id);
         return;
     }
+    if (seg->state == SEG_CONNECTING || seg->state == SEG_DOWNLOADING || seg->state == SEG_RETRYING) {
+        /* worker قبلی هنوز زنده است و خودش تلاش بعدی را انجام می‌دهد؛ worker دوم برای همین segment نمی‌سازیم */
+        LeaveCriticalSection(&seg->lock);
+        return;
+    }
     seg->lifecycle_busy = true;
     if (seg->thread) {
         CloseHandle(seg->thread);
@@ -398,6 +411,9 @@ void seg_resume(IDM_Segment *seg) {
     seg->cancel_flag = false;
     seg->retry_count = 0;
     seg->total_resume_count++;
+    /* از همین لحظه فعال است: اگه این‌جا عوض نشه، تا اجرای worker وضعیت FAILED می‌ماند و تیک بعدی موتور
+       دوباره resume می‌کند — یعنی دو worker برای یک segment. */
+    seg->state = SEG_CONNECTING;
     seg->thread = CreateThread(NULL, 0, seg_worker, seg, 0, NULL);
     seg->lifecycle_busy = false;
     LeaveCriticalSection(&seg->lock);

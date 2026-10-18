@@ -619,6 +619,19 @@ static bool any_failed(IDM_Download *dl) {
     return false;
 }
 
+/* segment ای که شکست خورده ولی هنوز به سقف تلاش نرسیده و نوبت تلاش دوباره‌اش است */
+static bool any_failed_retryable(IDM_Download *dl, uint32_t max_retries) {
+    for (uint32_t i = 0; i < dl->num_segments; i++) {
+        IDM_Segment *seg = dl->segments[i];
+        if (!seg) continue;
+        EnterCriticalSection(&seg->lock);
+        bool r = (seg->state == SEG_FAILED) && (seg->consec_failures < max_retries);
+        LeaveCriticalSection(&seg->lock);
+        if (r) return true;
+    }
+    return false;
+}
+
 static bool all_done_or_failed(IDM_Download *dl) {
     for (uint32_t i = 0; i < dl->num_segments; i++) {
         SEG_State s = dl->segments[i]->state;
@@ -641,7 +654,7 @@ static void stop_reason_text(IDM_Download *dl, char *out, size_t out_sz) {
         unsigned int id = seg->id;
         unsigned int tries = seg->consec_failures;
         LeaveCriticalSection(&seg->lock);
-        snprintf(out, out_sz, "segment #%u stopped after %u attempts without progress: %s", id, tries, why);
+        snprintf(out, out_sz, "seg #%u: %s (%u attempts, no progress)", id, why, tries);
         return;
     }
     snprintf(out, out_sz, "stopped: a segment failed");
@@ -806,7 +819,7 @@ static DWORD WINAPI scheduler_thread_impl(LPVOID param) {
                         if (eng->notify_hwnd)
                             PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
                                          (WPARAM)dl->id, (LPARAM)DL_COMPLETED);
-                    } else if (any_failed(dl)) {
+                    } else if (any_failed(dl) && !any_failed_retryable(dl, 10)) {
                         char why[256];
                         stop_reason_text(dl, why, sizeof(why));
                         LOGW(LOG_MOD_ENGINE, "dl#%u stopped: %s", dl->id, why);

@@ -39,19 +39,25 @@ IDM_Result dl_discover(const char *url, const char *referer,
     return IDM_OK;
 }
 
-DlStream *dl_stream_open_range(struct IDM_Download *dl, uint64_t start, uint64_t end) {
+DlStream *dl_stream_open_range_info(struct IDM_Download *dl, uint64_t start, uint64_t end,
+                                    uint32_t *retry_after_out) {
     if (!dl) return NULL;
     DlStream *s = (DlStream *)calloc(1, sizeof(*s));
     if (!s) return NULL;
+    if (retry_after_out) *retry_after_out = 0;
     if (ftp_is_ftp_url(dl->url)) {
         s->is_ftp = TRUE;
         s->ftp = ftp_range_open(dl_conn_url(dl), start, end);
         if (!s->ftp) { free(s); return NULL; }
     } else {
-        s->http = http_open_range(dl->url, dl->referer, dl, start, end);
+        s->http = http_open_range_ex(dl->url, dl->referer, dl, start, end, retry_after_out);
         if (!s->http) { free(s); return NULL; }
     }
     return s;
+}
+
+DlStream *dl_stream_open_range(struct IDM_Download *dl, uint64_t start, uint64_t end) {
+    return dl_stream_open_range_info(dl, start, end, NULL);
 }
 
 int dl_stream_read(DlStream *s, void *buf, int buf_size) {

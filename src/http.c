@@ -464,9 +464,10 @@ cleanup:
 /* ======================================================
    Open a ranged HTTP connection for a segment
    ====================================================== */
-HTTP_Conn *http_open_range(const char *url, const char *referer,
-                           struct IDM_Download *dl,
-                           uint64_t start, uint64_t end) {
+HTTP_Conn *http_open_range_ex(const char *url, const char *referer,
+                               struct IDM_Download *dl,
+                               uint64_t start, uint64_t end,
+                               uint32_t *retry_after_out) {
     if (!url) return NULL;
 
     HINTERNET inet = get_inet_handle();
@@ -566,6 +567,16 @@ HTTP_Conn *http_open_range(const char *url, const char *referer,
     /* 206 = partial content (range واقعاً honor شده)
        200 = سرور Range رو نادیده گرفته و کل فایل رو از صفر می‌فرسته */
     if (status != 206 && status != 200) {
+        /* گفتگو، نه دیکته: اگه سرور روی 429/503 صراحتاً Retry-After فرستاده، برای segment برمی‌گردونیم */
+        if (retry_after_out && (status == 429 || status == 503)) {
+            char ra[32] = {0};
+            DWORD ra_sz = sizeof(ra);
+            if (HttpQueryInfoA(conn->hRequest, HTTP_QUERY_RETRY_AFTER, ra, &ra_sz, NULL) &&
+                ra[0] && isdigit((unsigned char)ra[0])) {
+                long sec = atol(ra);
+                if (sec > 0 && sec <= 3600) *retry_after_out = (uint32_t)sec;
+            }
+        }
         InternetCloseHandle(conn->hRequest);
         InternetCloseHandle(conn->hConnect);
         free(conn);
@@ -578,6 +589,13 @@ HTTP_Conn *http_open_range(const char *url, const char *referer,
     conn->bytes_read  = 0;
     conn->open        = true;
     return conn;
+}
+
+/* حفظ سازگاری: همان رفتار قبلی، بدون گرفتن Retry-After */
+HTTP_Conn *http_open_range(const char *url, const char *referer,
+                           struct IDM_Download *dl,
+                           uint64_t start, uint64_t end) {
+    return http_open_range_ex(url, referer, dl, start, end, NULL);
 }
 
 /* ======================================================

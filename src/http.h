@@ -129,6 +129,10 @@ void http_extract_host(const char *url, char *out, int out_sz);
 HTTP_Conn *http_open_range(const char *url, const char *referer,
                            struct IDM_Download *dl,
                            uint64_t start, uint64_t end);
+HTTP_Conn *http_open_range_ex(const char *url, const char *referer,
+                               struct IDM_Download *dl,
+                               uint64_t start, uint64_t end,
+                               uint32_t *retry_after_out);
 int        http_read      (HTTP_Conn *conn, void *buf, int buf_size);
 void       http_close     (HTTP_Conn *conn);
 
