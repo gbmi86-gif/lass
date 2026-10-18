@@ -314,7 +314,7 @@ static DWORD WINAPI server_thread(LPVOID param) {
         }
     }
 
-    ext_log("[BrowserExt] pipe server stopped\n");
+    ext_log("[BrowserExt] pipe server stopped (%ld client thread(s) still active)\n", (long)priv->client_count);
     shutdown_brake_unregister(brake_id);
     return 0;
 }
@@ -518,8 +518,14 @@ void browser_ext_plugin_destroy(IDM_PluginHooks *plug) {
         LeaveCriticalSection(&p->handles_lock);
 
         if (n > 0) {
-            WaitForMultipleObjects((DWORD)n, snapshot, TRUE, 3000);
+            DWORD w = WaitForMultipleObjects((DWORD)n, snapshot, TRUE, 3000);
             for (int i = 0; i < n; i++) CloseHandle(snapshot[i]);
+            if (w == WAIT_TIMEOUT) {
+                /* client thread ها هنوز از priv استفاده می‌کنن؛ آزادش نمی‌کنیم تا use-after-free نشه */
+                ext_log("[BrowserExt] %d client thread(s) still running at destroy; plugin state kept alive\n", n);
+                free(plug);
+                return;
+            }
         }
 
         DeleteCriticalSection(&p->handles_lock);

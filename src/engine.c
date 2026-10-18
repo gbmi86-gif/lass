@@ -207,6 +207,17 @@ typedef struct {
     IDM_Download *dl;
 } LaunchCtx;
 
+/* نام قابل‌خواندن نتیجه‌ی discovery برای لاگ */
+static const char *idm_result_name(IDM_Result r) {
+    switch (r) {
+    case IDM_OK:            return "ok";
+    case IDM_ERR_NETWORK:   return "network error";
+    case IDM_ERR_NOT_FOUND: return "not found";
+    case IDM_ERR_INVALID:   return "invalid request";
+    default:                return "error";
+    }
+}
+
 static DWORD WINAPI launch_thread_impl(LPVOID param) {
     LaunchCtx    *ctx = (LaunchCtx *)param;
     IDM_Engine   *eng = ctx->eng;
@@ -225,7 +236,7 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
         /* چک کن آیا engine در حال shutdown هست قبل از شروع HTTP */
         if (eng->shutdown) {
             EnterCriticalSection(&eng->lock);
-            dl->state = DL_CANCELLED;
+            dl->state = DL_PAUSED;
             eng->active_count--;
             LeaveCriticalSection(&eng->lock);
             return 0;
@@ -270,6 +281,13 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
                این کلاینت زیاده). به‌جای DL_FAILED دائمی، چند بار
                با backoff افزایشی retry می‌کنیم — دقیقاً همون
                الگویی که برای segment ها در segment.c داریم. */
+            if (eng->shutdown) {
+                /* در حال خاموش شدن: retry برنامه‌ریزی نمی‌کنیم؛ دانلود به حالت متوقف برمی‌گردد تا بعد از شروع مجدد ادامه یابد */
+                dl->state = DL_PAUSED;
+                eng->active_count--;
+                LeaveCriticalSection(&eng->lock);
+                return 0;
+            }
             dl->launch_retry_count++;
             if (dl->launch_retry_count <= ENGINE_MAX_LAUNCH_RETRY) {
                 DWORD backoff_ms;
@@ -290,8 +308,8 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
                 dl->state = DL_QUEUED; /* scheduler دوباره بعد از backoff امتحان می‌کنه */
                 eng->active_count--;
                 LOGW(LOG_MOD_ENGINE,
-                     "dl#%u launch failed (attempt %u/%u) — retry in %lums%s",
-                     dl->id, dl->launch_retry_count, ENGINE_MAX_LAUNCH_RETRY,
+                     "dl#%u launch failed (%s, attempt %u/%u) — retry in %lums%s",
+                     dl->id, idm_result_name(r), dl->launch_retry_count, ENGINE_MAX_LAUNCH_RETRY,
                      (unsigned long)backoff_ms,
                      server_specified ? " (server-requested via Retry-After)" : "");
                 if (eng->notify_hwnd)
@@ -819,9 +837,8 @@ void engine_destroy(IDM_Engine *eng) {
     if (!eng) return;
 
     engine_signal_shutdown(eng);
-    WaitForSingleObject(eng->scheduler, 5000);   /* scheduler با wake_event زود برمی‌گردد */
-    CloseHandle(eng->scheduler);
-    CloseHandle(eng->wake_event);
+    /* scheduler با wake_event بیدار می‌شود و ref خودش را آزاد می‌کند؛ اینجا منتظرش نمی‌مانیم.
+       handle ها در engine_free_final بسته می‌شوند، یعنی وقتی دیگر هیچ thread ای از آن‌ها استفاده نمی‌کند. */
 
     if (eng->active_count > 0)
         LOGI(LOG_MOD_ENGINE,
@@ -838,6 +855,8 @@ static void engine_release(IDM_Engine *eng) {
 
 /* آزادسازی نهایی: فقط وقتی هیچ thread ای eng یا dl را نگه نداشته */
 static void engine_free_final(IDM_Engine *eng) {
+    if (eng->scheduler) CloseHandle(eng->scheduler);
+    if (eng->wake_event) CloseHandle(eng->wake_event);
     EnterCriticalSection(&eng->lock);
     IDM_Download *dl = eng->queue_head;
     while (dl) {
