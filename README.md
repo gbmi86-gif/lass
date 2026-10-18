@@ -1,5 +1,13 @@
-<img width="1114" height="743" alt="Screenshot 2026-10-18 123512" src="https://github.com/user-attachments/assets/b728a3a2-dcf2-426f-948e-75d2a1c4b574" />
 # Lass Download Manager v5
+
+A fast, plugin-based download manager for Windows — built from scratch with Win32 and WinINet, with zero external dependencies.
+
+![Lass Download Manager Screenshot](https://github.com/gbmi86-gif/lass/raw/main/screenshot.png)
+
+*(اگر اسم فایل عکست چیز دیگری است، کلمه `screenshot.png` در خط بالا را به اسم فایل خودت تغییر بده. اگر عکس در پوشه‌ای مثل images است، آدرس را به `.../raw/main/images/اسم-عکس.png` تغییر بده)*
+
+---
+
 ## ✨ Features
 - **Multi-segment:** Up to 16 parallel connections.
 - **Resume:** Resume interrupted downloads.
@@ -26,57 +34,25 @@
 - **Command injection protection:** Prevents malicious execution.
 - **Integer overflow checks:** Safe memory handling.
 - **Test isolation:** `lass_paths` ensures the real profile remains untouched.
-دانلود منیجر سریع برای ویندوز — ساخته‌شده با Win32 و WinINet، بدون هیچ dependency خارجی.
 
-A fast, plugin-based download manager for Windows — built from scratch with Win32 and WinINet.
-
-## ✨ Features
-
-- **Multi-segment** (تا ۱۶ اتصال موازی)
-- **Resume** (ادامه دانلود قطع‌شده)
-- **Segment Park** (توقف segment بعد از ۱۰ تلاش بدون پیشرفت)
-- **Retry-After** (احترام به درخواست سرور)
-- **FTP** (WinSock مستقل، با REST support)
-- **HLS / DASH / RTMP** (native)
-- **Video Sniffer** (YouTube, Aparat, Instagram, Twitter, Vimeo)
-- **Browser Extension** (Chrome / Firefox / Edge)
-- **Cookie Jar** (RFC 6265)
-- **Proxy** (HTTP / SOCKS4 / SOCKS5)
-- **HTTP Auth** (Basic / Digest)
-- **Speed Scheduler** (محدودیت سرعت ساعتی)
-- **Speed Graph** (نمودار سرعت با GDI)
-- **Categories** (Video, Audio, Document, Software, Image)
-- **Clipboard Monitor**
-- **Download Basket**
-- **Notifications** (toast + tray)
-- **Persian + English UI** (i18n)
-
-## 🛡️ Security
-
-- **AES-GCM encryption** برای `.tels` container
-- **DPAPI** برای کلید (user + machine bound)
-- **URL credentials protection** (split / redact / encrypted store)
-- **Filename sanitization** (path traversal / illegal chars)
-- **Content-Length validation** (DoS protection)
-- **Command injection protection**
-- **Integer overflow checks**
-- **Test isolation** (`lass_paths` — پروفایل واقعی دست‌نخورده)
+---
 
 ## 🏗️ Architecture
 
+```text
 Lass/
-├── src/               ← کد اصلی (۱۹ فایل)
+├── src/                 ← Core code (19 files)
 │   ├── types.h
-│   ├── http.c/h       ← HTTP با WinINet
-│   ├── transport.c/h  ← abstraction برای HTTP/FTP
-│   ├── storage.c/h    ← فایل‌نویسی با OVERLAPPED IO
-│   ├── tels_container.c/h  ← transactional container
-│   ├── lass_store.c/h ← Key-Value Store
-│   ├── segment.c/h    ← هر بخش، thread جداگانه
-│   ├── resume.c/h     ← ذخیره/بازیابی
-│   ├── engine.c/h     ← موتور مرکزی
+│   ├── http.c/h         ← HTTP with WinINet
+│   ├── transport.c/h    ← Abstraction for HTTP/FTP
+│   ├── storage.c/h      ← File writing with OVERLAPPED IO
+│   ├── tels_container.c/h ← Transactional container
+│   ├── lass_store.c/h   ← Key-Value Store
+│   ├── segment.c/h      ← Each segment, separate thread
+│   ├── resume.c/h       ← Save/restore
+│   ├── engine.c/h       ← Central engine
 │   ├── queue_persist.c/h
-│   ├── lass_paths.c/h ← test isolation
+│   ├── lass_paths.c/h   ← Test isolation
 │   ├── crash_report.c/h
 │   ├── shutdown_brake.c/h
 │   ├── secure_store.c/h
@@ -86,8 +62,7 @@ Lass/
 │   ├── lass_log.c/h
 │   ├── settings.c/h
 │   └── i18n.c/h
-│
-├── plugins/           ← ۲۰ پلاگین
+├── plugins/             ← 20 plugins
 │   ├── plugin_api.c
 │   ├── plugins_setup.c
 │   ├── plugin_smart_resume.c
@@ -108,26 +83,14 @@ Lass/
 │   ├── plugin_rtmp.c
 │   ├── plugin_video_sniffer.c
 │   └── plugin_speed_scheduler.c
-│
 ├── core/
-│   ├── core_ldm.c/h   ← API مرکزی
-│   └── guo.c/h        ← UI (GUI)
-│
-├── tests/             ← ۷۶۲/۷۶۷ تست
+│   ├── core_ldm.c/h     ← Central API
+│   └── guo.c/h          ← UI (GUI)
+├── tests/               ← 762/767 tests passing
 │   ├── test_all.c
 │   ├── test_httpd.c
 │   └── test_ftpd.c
-│
 ├── build.bat
 ├── CMakeLists.txt
-├── LICENSE            ← GPL-3.0
+├── LICENSE              ← GPL-3.0
 └── README.md
-
-## 🔨 Building
-
-**نیازمندی‌ها:** MinGW-w64 (MSYS2 یا winlibs)
-
-**روش ۱: CMake**
-```bash
-cmake -S . -B build -G "MinGW Makefiles"
-cmake --build build
