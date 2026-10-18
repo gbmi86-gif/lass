@@ -1,3 +1,4 @@
+<img width="1114" height="743" alt="Screenshot 2026-10-18 123512" src="https://github.com/user-attachments/assets/b728a3a2-dcf2-426f-948e-75d2a1c4b574" />
 # Lass Download Manager v5
 
 دانلود منیجر سریع برای ویندوز — ساخته‌شده با Win32 و WinINet، بدون هیچ dependency خارجی.
