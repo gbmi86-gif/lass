@@ -1,3 +1,4 @@
+<img width="1156" height="778" alt="Lass" src="https://github.com/user-attachments/assets/b6dc4ef5-fd26-4213-be05-8859c1165b3a" />
 ✨ Features
 Multi-segment: Up to 16 parallel connections.
 Resume: Resume interrupted downloads.
