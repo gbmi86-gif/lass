@@ -1,0 +1,64 @@
+# ──────────────────────────────────────
+#  Lass Download Manager — .gitignore
+# ──────────────────────────────────────
+
+# ── Build artifacts ──
+*.exe
+*.dll
+*.o
+*.obj
+*.lib
+*.a
+*.so
+*.res
+build/
+build-debug/
+bin/
+obj/
+cmake-build-*/
+
+# ── Installer output ──
+installer/
+installer/output/
+installer/*.exe
+
+# ── IDE / Editors ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Logs ──
+*.log
+lass.log*
+lass_*.log*
+
+# ── User data (production) ──
+*.ini
+queue.dat
+cookies.txt
+*.tels
+*.idmstate
+
+# ── Test data ──
+lass_test_data/
+test_all.exe
+test_output.txt
+*.tels.tmp
+
+# ── OS ──
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ── Backup ──
+*.bak
+*.tmp
+*.old
+
+# ── Commit message temp ──
+commit_msg.txt
+
+# ── Random ──
+segments
