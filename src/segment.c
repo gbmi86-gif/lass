@@ -20,6 +20,11 @@ extern volatile uint64_t g_global_speed_limit;
 #include "engine.h"   /* for IDM_Download definition */
 #include "lass_log.h"
 
+/* علت شکست را نگه می‌داریم تا لاگ و علت توقف بگویند چرا؛ باید زیر seg->lock صدا زده شود */
+static void seg_note_error(IDM_Segment *seg, const char *reason) {
+    snprintf(seg->last_error, sizeof(seg->last_error), "%s", reason);
+}
+
 /* ── Sleep قابل‌قطع ──
    Sleep() معمولی اصلاً cancel_flag رو چک نمی‌کنه. اگه کاربر دقیقاً
    وسط یه backoff طولانی (retry_count بالا → تا ۳۲ ثانیه، طبق فرمول
@@ -57,6 +62,7 @@ retry:
         EnterCriticalSection(&seg->lock);
         seg->retry_count++;
         if (seg->retry_count > SEG_MAX_RETRY || seg->cancel_flag) {
+            seg_note_error(seg, "connection could not be opened (retries exhausted)");
             seg->state = SEG_FAILED;
             LeaveCriticalSection(&seg->lock);
             return 1;
@@ -85,6 +91,7 @@ retry:
     if (seg->start > 0 && !dl_stream_got_partial(conn)) {
         dl_stream_close(conn);
         EnterCriticalSection(&seg->lock);
+        seg_note_error(seg, "server ignored the range request");
         seg->state = SEG_FAILED;
         LeaveCriticalSection(&seg->lock);
         LOGI(LOG_MOD_SEGMENT, "[Segment #%u] Server ignored Range request (got 200, "
@@ -104,6 +111,7 @@ retry:
     if (!buf) {
         dl_stream_close(conn);
         EnterCriticalSection(&seg->lock);
+        seg_note_error(seg, "out of memory");
         seg->state = SEG_FAILED;
         LeaveCriticalSection(&seg->lock);
         return 1;
@@ -131,6 +139,7 @@ retry:
             EnterCriticalSection(&seg->lock);
             seg->retry_count++;
             if (seg->retry_count > SEG_MAX_RETRY) {
+                seg_note_error(seg, "connection dropped while reading");
                 seg->state = SEG_FAILED;
                 LeaveCriticalSection(&seg->lock);
                 return 1;
@@ -152,6 +161,7 @@ retry:
             dl_stream_close(conn);
             free(buf);
             EnterCriticalSection(&seg->lock);
+            seg_note_error(seg, "disk write failed");
             seg->state = SEG_FAILED;
             LeaveCriticalSection(&seg->lock);
             return 1;
@@ -161,6 +171,8 @@ retry:
         EnterCriticalSection(&seg->lock);
         seg->current += (uint64_t)n;
         seg->written += (uint64_t)n;
+        seg->consec_failures = 0;
+        seg->parked_logged = false;
         LeaveCriticalSection(&seg->lock);
 
         /* Update global downloaded counter (atomic add) */
@@ -204,6 +216,7 @@ retry:
            رو بست. این یه شکست جزئی هست، retry می‌کنیم. */
         seg->retry_count++;
         if (seg->retry_count > SEG_MAX_RETRY) {
+            seg_note_error(seg, "connection closed before the range ended");
             seg->state = SEG_FAILED;
         } else {
             seg->state = SEG_RETRYING;

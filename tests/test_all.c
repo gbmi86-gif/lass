@@ -2552,6 +2552,97 @@ static void test_engine_destroy_while_launching(void) {
     DeleteFileA("stall_test.bin");
 }
 
+/* ======================================================
+   تست: سیاست «۱۰ شکست پیاپی» — سروری که Range را نادیده می‌گیرد
+   ====================================================== */
+#define POLICY_BODY_SIZE (8u * 1024u * 1024u)
+
+static DWORD WINAPI range_ignoring_server(LPVOID p) {
+    SOCKET ls = (SOCKET)(UINT_PTR)p;
+    for (;;) {
+        SOCKET c = accept(ls, NULL, NULL);
+        if (c == INVALID_SOCKET) break;          /* listening socket بسته شد: تست تمام شده */
+        char req[1024];
+        int got = recv(c, req, (int)sizeof(req) - 1, 0);
+        if (got > 0) {
+            req[got] = '\0';
+            BOOL head = (strncmp(req, "HEAD", 4) == 0);
+            char hdr[256];
+            int hl = snprintf(hdr, sizeof(hdr),
+                "HTTP/1.1 200 OK\r\nContent-Length: %u\r\nAccept-Ranges: bytes\r\n"
+                "ETag: \"policy\"\r\nConnection: close\r\n\r\n", (unsigned)POLICY_BODY_SIZE);
+            send(c, hdr, hl, 0);
+            if (!head) {
+                static char zeros[65536];
+                uint32_t sent = 0;
+                while (sent < POLICY_BODY_SIZE) {
+                    uint32_t left = POLICY_BODY_SIZE - sent;
+                    int chunk = (int)(left < sizeof(zeros) ? left : sizeof(zeros));
+                    int r = send(c, zeros, chunk, 0);
+                    if (r <= 0) break;
+                    sent += (uint32_t)r;
+                }
+            }
+        }
+        closesocket(c);
+    }
+    return 0;
+}
+
+static void test_segment_policy_parks_stuck_range(void) {
+    SECTION("Segment policy: an ignored range is parked, then the download stops with a reason");
+    WSADATA wd;
+    WSAStartup(MAKEWORD(2, 2), &wd);
+    SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = htons(18478);
+    BOOL ok = (ls != INVALID_SOCKET) &&
+              bind(ls, (struct sockaddr *)&sa, sizeof(sa)) == 0 &&
+              listen(ls, 8) == 0;
+    TEST("range-ignoring server listening", ok);
+    if (!ok) {
+        if (ls != INVALID_SOCKET) closesocket(ls);
+        return;
+    }
+    HANDLE th = CreateThread(NULL, 0, range_ignoring_server, (LPVOID)(UINT_PTR)ls, 0, NULL);
+
+    IDM_Engine *eng = engine_create(NULL);
+    IDM_Download *dl = eng ? engine_add(eng, "http://127.0.0.1:18478/policy.bin", "policy_test.bin", 4, 1) : NULL;
+    TEST("download added", dl != NULL);
+
+    DL_State st = DL_QUEUED;
+    char reason[256];
+    memset(reason, 0, sizeof(reason));
+    int waited = 0;
+    while (dl && waited < 40000) {
+        Sleep(250);
+        waited += 250;
+        EnterCriticalSection(&eng->lock);
+        st = dl->state;
+        size_t fl = strlen(dl->fail_reason);
+        if (fl > sizeof(reason) - 1) fl = sizeof(reason) - 1;
+        memcpy(reason, dl->fail_reason, fl);
+        reason[fl] = '\0';
+        LeaveCriticalSection(&eng->lock);
+        if (st == DL_FAILED || st == DL_COMPLETED) break;
+    }
+    TEST("download stops once every segment is parked", st == DL_FAILED);
+    TEST("the stop reason says why", strstr(reason, "without progress") != NULL &&
+                                     strstr(reason, "ignored the range") != NULL);
+
+    engine_destroy(eng);
+    closesocket(ls);
+    if (th) {
+        WaitForSingleObject(th, 5000);
+        CloseHandle(th);
+    }
+    DeleteFileA("policy_test.bin");
+    DeleteFileA("policy_test.bin.tels");
+}
+
 static void test_crash_report(void) {
     SECTION("Crash Report (fault location + call stack)");
 
@@ -4136,6 +4227,7 @@ int main(void) {
     test_lass_store();
     test_state_migration();
     test_engine_destroy_while_launching();
+    test_segment_policy_parks_stuck_range();
     test_launch_retry_backoff();
     test_permanent_vs_transient_errors();
     test_http_extract_host();

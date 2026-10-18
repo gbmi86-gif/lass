@@ -46,6 +46,12 @@ struct IDM_Segment {
        چون retry_count هر بار صفر می‌شه تا ابد retry کنه. */
     uint32_t      total_resume_count;
 
+    /* سیاست «شکست‌های پیاپی»: تعداد تلاش‌های بعدی بدون هیچ بایت پیشرفت.
+       با هر بایتی که نوشته شود صفر می‌شود (segment.c)؛ به سقف برسد، segment کنار گذاشته می‌شود. */
+    uint32_t      consec_failures;
+    bool          parked_logged;   /* لاگ «کنار گذاشته شد» فقط یک بار */
+    char          last_error[96];  /* علت آخرین شکست، برای لاگ و علت توقف دانلود */
+
     /* Threading */
     HANDLE        thread;
     volatile bool cancel_flag;    /* set to stop worker */

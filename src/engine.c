@@ -628,23 +628,51 @@ static bool all_done_or_failed(IDM_Download *dl) {
     return true;
 }
 
+/* علت توقف دانلود: اولین segment کنار گذاشته‌شده و آخرین علتش */
+static void stop_reason_text(IDM_Download *dl, char *out, size_t out_sz) {
+    out[0] = '\0';
+    for (uint32_t i = 0; i < dl->num_segments; i++) {
+        IDM_Segment *seg = dl->segments[i];
+        if (!seg || seg->state != SEG_FAILED) continue;
+        EnterCriticalSection(&seg->lock);
+        char why[96];
+        memcpy(why, seg->last_error, sizeof(why));
+        why[sizeof(why) - 1] = '\0';
+        unsigned int id = seg->id;
+        unsigned int tries = seg->consec_failures;
+        LeaveCriticalSection(&seg->lock);
+        snprintf(out, out_sz, "segment #%u stopped after %u attempts without progress: %s", id, tries, why);
+        return;
+    }
+    snprintf(out, out_sz, "stopped: a segment failed");
+}
+
+/* سیاست «۱۰ شکست پیاپی»: هر تلاش دوباره تا وقتی بایتی پیشرفت نکرده، یک شکست پیاپی حساب می‌شود.
+   با پیشرفت (در segment.c) شمارنده صفر می‌شود، پس segment سالم هیچ‌وقت کنار گذاشته نمی‌شود. */
 static void auto_retry_failed_segs(IDM_Download *dl, uint32_t max_retries) {
     for (uint32_t i = 0; i < dl->num_segments; i++) {
         IDM_Segment *seg = dl->segments[i];
         if (!seg) continue;
+
         EnterCriticalSection(&seg->lock);
-        /* از total_resume_count استفاده می‌کنیم، نه retry_count —
-           چون خودِ seg_resume هر بار retry_count رو صفر می‌کنه؛ اگه
-           از همون استفاده می‌کردیم این تابع هیچ‌وقت واقعاً به سقف
-           نمی‌رسید و یه لینک واقعاً خراب رو تا ابد retry می‌کرد
-           (دقیقاً چیزی که در لاگ واقعی دیده شد: "attempt 7/10"
-           بی‌نهایت تکرار می‌شد، هیچ‌وقت به ۱۰ نمی‌رسید). */
-        bool should_retry = (seg->state == SEG_FAILED) &&
-                            (seg->total_resume_count < max_retries);
+        bool failed = (seg->state == SEG_FAILED);
+        bool parked = failed && (seg->consec_failures >= max_retries);
+        bool first_park = parked && !seg->parked_logged;
+        if (first_park) seg->parked_logged = true;
+        uint32_t attempt = seg->consec_failures + 1;
+        if (failed && !parked) seg->consec_failures++;
+        char why[96];
+        memcpy(why, seg->last_error, sizeof(why));
+        why[sizeof(why) - 1] = '\0';
         LeaveCriticalSection(&seg->lock);
-        if (should_retry) {
-            LOGI(LOG_MOD_ENGINE, "Auto-retry seg#%u (attempt %u/%u)",
-                    seg->id, seg->total_resume_count + 1, max_retries);
+
+        if (first_park) {
+            LOGW(LOG_MOD_ENGINE, "Segment #%u parked after %u attempts without progress: %s",
+                 seg->id, max_retries, why);
+        }
+        if (failed && !parked) {
+            LOGI(LOG_MOD_ENGINE, "Auto-retry seg#%u (attempt %u/%u): %s",
+                 seg->id, attempt, max_retries, why);
             seg_resume(seg);
         }
     }
@@ -779,6 +807,13 @@ static DWORD WINAPI scheduler_thread_impl(LPVOID param) {
                             PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
                                          (WPARAM)dl->id, (LPARAM)DL_COMPLETED);
                     } else if (any_failed(dl)) {
+                        char why[256];
+                        stop_reason_text(dl, why, sizeof(why));
+                        LOGW(LOG_MOD_ENGINE, "dl#%u stopped: %s", dl->id, why);
+                        size_t wl = strlen(why);
+                        if (wl >= sizeof(dl->fail_reason)) wl = sizeof(dl->fail_reason) - 1;
+                        memcpy(dl->fail_reason, why, wl);
+                        dl->fail_reason[wl] = '\0';
                         dl->state = DL_FAILED;
                         eng->active_count--;
                         resume_save(dl);
