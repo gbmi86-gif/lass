@@ -1,8 +1,8 @@
 # Lass Download Manager v5
 
 A fast, plugin-based download manager for Windows — built from scratch with Win32 and WinINet, with zero external dependencies.
+<img width="1114" height="743" alt="Screenshot 2026-10-18 123512" src="https://github.com/user-attachments/assets/21fa1a4a-7016-49e1-a96b-04bcdecef01c" />
 
-![Lass Download Manager Screenshot](https://github.com/gbmi86-gif/lass/raw/main/screenshot.png)
 
 ## ✨ Features
 - **Multi-segment:** Up to 16 parallel connections.
