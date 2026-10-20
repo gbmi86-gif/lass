@@ -2634,13 +2634,44 @@ static DWORD WINAPI policy_conn_proc(LPVOID p) {
     SOCKET c = (SOCKET)(UINT_PTR)p;
     char req[2048];
     if (read_request_head(c, req, sizeof(req))) {
-        BOOL head = (strncmp(req, "HEAD", 4) == 0);
-        char hdr[256];
-        int hl = snprintf(hdr, sizeof(hdr),
-            "HTTP/1.1 200 OK\r\nContent-Length: %u\r\nAccept-Ranges: bytes\r\n"
-            "ETag: \"policy\"\r\nConnection: close\r\n\r\n", (unsigned)POLICY_BODY_SIZE);
-        if (send_all(c, hdr, (size_t)hl) && !head)
-            send_zeros(c, POLICY_BODY_SIZE);
+        if (strncmp(req, "HEAD", 4) == 0) {
+            char hdr[256];
+            int hl = snprintf(hdr, sizeof(hdr),
+                "HTTP/1.1 200 OK\r\nContent-Length: %u\r\nAccept-Ranges: bytes\r\n"
+                "ETag: \"policy\"\r\nConnection: close\r\n\r\n", (unsigned)POLICY_BODY_SIZE);
+            send_all(c, hdr, (size_t)hl);
+        } else {
+            /* بخش اول (شروع از بایت ۰) را درست جواب می‌دهیم تا روی هر ماشینی زود تمام شود.
+               بخشی که از وسط فایل شروع شود Range را نادیده می‌گیرد — همان مورد اصلی تست. */
+            unsigned long long s = 0, e = POLICY_BODY_SIZE - 1ull;
+            const char *rp = strstr(req, "Range: bytes=");
+            if (rp) {
+                rp += 13;
+                s = strtoull(rp, NULL, 10);
+                const char *dash = strchr(rp, '-');
+                if (dash && dash[1] >= '0' && dash[1] <= '9')
+                    e = strtoull(dash + 1, NULL, 10);
+            }
+            if (e >= POLICY_BODY_SIZE) e = POLICY_BODY_SIZE - 1ull;
+            if (rp && s == 0) {
+                unsigned long long len = e + 1ull;
+                char hdr[320];
+                int hl = snprintf(hdr, sizeof(hdr),
+                    "HTTP/1.1 206 Partial Content\r\nContent-Length: %llu\r\n"
+                    "Content-Range: bytes 0-%llu/%u\r\nAccept-Ranges: bytes\r\n"
+                    "ETag: \"policy\"\r\nConnection: close\r\n\r\n",
+                    len, e, (unsigned)POLICY_BODY_SIZE);
+                if (send_all(c, hdr, (size_t)hl))
+                    send_zeros(c, len);
+            } else {
+                char hdr[256];
+                int hl = snprintf(hdr, sizeof(hdr),
+                    "HTTP/1.1 200 OK\r\nContent-Length: %u\r\nAccept-Ranges: bytes\r\n"
+                    "ETag: \"policy\"\r\nConnection: close\r\n\r\n", (unsigned)POLICY_BODY_SIZE);
+                if (send_all(c, hdr, (size_t)hl))
+                    send_zeros(c, POLICY_BODY_SIZE);
+            }
+        }
     }
     closesocket(c);
     return 0;
