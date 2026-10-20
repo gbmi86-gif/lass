@@ -1,11 +1,6 @@
 # Lass Download Manager v5
 
 A fast, plugin-based download manager for Windows — built from scratch with Win32 and WinINet, with zero external dependencies.
-
-![Lass Download Manager Screenshot](https://github.com/gbmi86-gif/lass/raw/main/screenshot.png)
-
-*(اگر اسم فایل عکست چیز دیگری است، کلمه `screenshot.png` در خط بالا را به اسم فایل خودت تغییر بده. اگر عکس در پوشه‌ای مثل images است، آدرس را به `.../raw/main/images/اسم-عکس.png` تغییر بده)*
-
 ---
 
 ## ✨ Features
