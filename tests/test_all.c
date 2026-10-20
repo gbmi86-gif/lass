@@ -2557,35 +2557,92 @@ static void test_engine_destroy_while_launching(void) {
    ====================================================== */
 #define POLICY_BODY_SIZE (8u * 1024u * 1024u)
 
-static DWORD WINAPI range_ignoring_server(LPVOID p) {
-    SOCKET ls = (SOCKET)(UINT_PTR)p;
-    for (;;) {
-        SOCKET c = accept(ls, NULL, NULL);
-        if (c == INVALID_SOCKET) break;          /* listening socket بسته شد: تست تمام شده */
-        char req[1024];
-        int got = recv(c, req, (int)sizeof(req) - 1, 0);
-        if (got > 0) {
-            req[got] = '\0';
-            BOOL head = (strncmp(req, "HEAD", 4) == 0);
-            char hdr[256];
-            int hl = snprintf(hdr, sizeof(hdr),
-                "HTTP/1.1 200 OK\r\nContent-Length: %u\r\nAccept-Ranges: bytes\r\n"
-                "ETag: \"policy\"\r\nConnection: close\r\n\r\n", (unsigned)POLICY_BODY_SIZE);
-            send(c, hdr, hl, 0);
-            if (!head) {
-                static char zeros[65536];
-                uint32_t sent = 0;
-                while (sent < POLICY_BODY_SIZE) {
-                    uint32_t left = POLICY_BODY_SIZE - sent;
-                    int chunk = (int)(left < sizeof(zeros) ? left : sizeof(zeros));
-                    int r = send(c, zeros, chunk, 0);
-                    if (r <= 0) break;
-                    sent += (uint32_t)r;
-                }
-            }
-        }
-        closesocket(c);
+/* ── کمک‌های سرور تست ───────────────────────────────────────────────
+   هر اتصال در thread خودش اجرا می‌شه: یه client کند نباید بقیه‌ی
+   درخواست‌ها را پشت سر خودش معطل کنه (سرور تک‌thread قبلی همین بود). */
+typedef struct {
+    SOCKET ls;
+    LPTHREAD_START_ROUTINE handler;
+} ServerCtx;
+
+static char g_zero_block[65536];   /* فقط خواندنی؛ بین thread ها مشترکه */
+
+static BOOL send_all(SOCKET c, const void *buf, size_t n) {
+    const char *p = (const char *)buf;
+    size_t sent = 0;
+    while (sent < n) {
+        size_t left = n - sent;
+        int chunk = (int)(left > 65536 ? 65536 : left);
+        int r = send(c, p + sent, chunk, 0);
+        if (r <= 0) return FALSE;
+        sent += (size_t)r;
     }
+    return TRUE;
+}
+
+static BOOL send_zeros(SOCKET c, unsigned long long total) {
+    while (total > 0) {
+        size_t chunk = total > sizeof(g_zero_block) ? sizeof(g_zero_block) : (size_t)total;
+        if (!send_all(c, g_zero_block, chunk)) return FALSE;
+        total -= chunk;
+    }
+    return TRUE;
+}
+
+/* سرِ درخواست را تا \r\n\r\n می‌خونیم: یه recv تنها ممکنه فقط بخشی از هدرها را بیاره و Range جا بیفته */
+static BOOL read_request_head(SOCKET c, char *buf, size_t cap) {
+    size_t used = 0;
+    if (cap == 0) return FALSE;
+    buf[0] = '\0';
+    while (used + 1 < cap) {
+        int r = recv(c, buf + used, (int)(cap - used - 1), 0);
+        if (r <= 0) break;
+        used += (size_t)r;
+        buf[used] = '\0';
+        if (strstr(buf, "\r\n\r\n")) return TRUE;
+    }
+    return FALSE;
+}
+
+static DWORD WINAPI accept_loop(LPVOID p) {
+    ServerCtx *ctx = (ServerCtx *)p;
+    for (;;) {
+        SOCKET c = accept(ctx->ls, NULL, NULL);
+        if (c == INVALID_SOCKET) break;      /* listening socket بسته شد: تست تمام شده */
+        DWORD tv = 5000;
+        setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+        HANDLE t = CreateThread(NULL, 0, ctx->handler, (LPVOID)(UINT_PTR)c, 0, NULL);
+        if (t) CloseHandle(t);
+        else closesocket(c);
+    }
+    free(ctx);
+    return 0;
+}
+
+static HANDLE start_test_server(SOCKET ls, LPTHREAD_START_ROUTINE handler) {
+    ServerCtx *ctx = (ServerCtx *)malloc(sizeof(*ctx));
+    if (!ctx) return NULL;
+    ctx->ls = ls;
+    ctx->handler = handler;
+    HANDLE th = CreateThread(NULL, 0, accept_loop, ctx, 0, NULL);
+    if (!th) free(ctx);
+    return th;
+}
+
+/* سرور: Range را نادیده می‌گیرد؛ HEAD درست است، GET همیشه کل فایل را با 200 می‌فرستد */
+static DWORD WINAPI policy_conn_proc(LPVOID p) {
+    SOCKET c = (SOCKET)(UINT_PTR)p;
+    char req[2048];
+    if (read_request_head(c, req, sizeof(req))) {
+        BOOL head = (strncmp(req, "HEAD", 4) == 0);
+        char hdr[256];
+        int hl = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.1 200 OK\r\nContent-Length: %u\r\nAccept-Ranges: bytes\r\n"
+            "ETag: \"policy\"\r\nConnection: close\r\n\r\n", (unsigned)POLICY_BODY_SIZE);
+        if (send_all(c, hdr, (size_t)hl) && !head)
+            send_zeros(c, POLICY_BODY_SIZE);
+    }
+    closesocket(c);
     return 0;
 }
 
@@ -2607,7 +2664,7 @@ static void test_segment_policy_parks_stuck_range(void) {
         if (ls != INVALID_SOCKET) closesocket(ls);
         return;
     }
-    HANDLE th = CreateThread(NULL, 0, range_ignoring_server, (LPVOID)(UINT_PTR)ls, 0, NULL);
+    HANDLE th = start_test_server(ls, policy_conn_proc);
 
     IDM_Engine *eng = engine_create(NULL);
     IDM_Download *dl = eng ? engine_add(eng, "http://127.0.0.1:18478/policy.bin", "policy_test.bin", 4, 1) : NULL;
@@ -2649,64 +2706,52 @@ static void test_segment_policy_parks_stuck_range(void) {
    ====================================================== */
 #define RETRY_BODY_SIZE (8u * 1024u * 1024u)
 static volatile LONG g_retry_429_served = 0;
+static volatile LONG g_retry_gets_seen = 0;
 
-static DWORD WINAPI retry_after_server(LPVOID p) {
-    SOCKET ls = (SOCKET)(UINT_PTR)p;
-    static LONG gets_seen = 0;
-    for (;;) {
-        SOCKET c = accept(ls, NULL, NULL);
-        if (c == INVALID_SOCKET) break;
-        char req[2048];
-        int got = recv(c, req, (int)sizeof(req) - 1, 0);
-        if (got > 0) {
-            req[got] = '\0';
-            if (strncmp(req, "HEAD", 4) == 0) {
-                char hdr[256];
-                int hl = snprintf(hdr, sizeof(hdr),
-                    "HTTP/1.1 200 OK\r\nContent-Length: %u\r\nAccept-Ranges: bytes\r\n"
-                    "ETag: \"retry\"\r\nConnection: close\r\n\r\n", (unsigned)RETRY_BODY_SIZE);
-                send(c, hdr, hl, 0);
+/* سرور: دو GET اول 429 با Retry-After، بعد Range را درست جواب می‌دهد */
+static DWORD WINAPI retry_conn_proc(LPVOID p) {
+    SOCKET c = (SOCKET)(UINT_PTR)p;
+    char req[2048];
+    if (read_request_head(c, req, sizeof(req))) {
+        if (strncmp(req, "HEAD", 4) == 0) {
+            char hdr[256];
+            int hl = snprintf(hdr, sizeof(hdr),
+                "HTTP/1.1 200 OK\r\nContent-Length: %u\r\nAccept-Ranges: bytes\r\n"
+                "ETag: \"retry\"\r\nConnection: close\r\n\r\n", (unsigned)RETRY_BODY_SIZE);
+            send_all(c, hdr, (size_t)hl);
+        } else {
+            LONG n = InterlockedIncrement(&g_retry_gets_seen);
+            if (n <= 2) {
+                InterlockedIncrement(&g_retry_429_served);
+                static const char r429[] =
+                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\n"
+                    "Content-Length: 0\r\nConnection: close\r\n\r\n";
+                send_all(c, r429, sizeof(r429) - 1);
             } else {
-                LONG n = InterlockedIncrement(&gets_seen);
-                if (n <= 2) {
-                    InterlockedIncrement(&g_retry_429_served);
-                    static const char r429[] =
-                        "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\n"
-                        "Content-Length: 0\r\nConnection: close\r\n\r\n";
-                    send(c, r429, (int)(sizeof(r429) - 1), 0);
-                } else {
-                    unsigned long long s = 0, e = RETRY_BODY_SIZE - 1ull;
-                    const char *rp = strstr(req, "Range: bytes=");
-                    if (rp) {
-                        rp += 13;
-                        s = strtoull(rp, NULL, 10);
-                        const char *dash = strchr(rp, '-');
-                        if (dash && dash[1] >= '0' && dash[1] <= '9')
-                            e = strtoull(dash + 1, NULL, 10);
-                    }
-                    if (e >= RETRY_BODY_SIZE) e = RETRY_BODY_SIZE - 1ull;
-                    unsigned long long len = e - s + 1ull;
-                    char hdr[320];
-                    int hl = snprintf(hdr, sizeof(hdr),
-                        "HTTP/1.1 206 Partial Content\r\nContent-Length: %llu\r\n"
-                        "Content-Range: bytes %llu-%llu/%u\r\nAccept-Ranges: bytes\r\n"
-                        "ETag: \"retry\"\r\nConnection: close\r\n\r\n",
-                        len, s, e, (unsigned)RETRY_BODY_SIZE);
-                    send(c, hdr, hl, 0);
-                    static char zeros[65536];
-                    unsigned long long sent = 0;
-                    while (sent < len) {
-                        unsigned long long left = len - sent;
-                        int chunk = (int)(left < sizeof(zeros) ? left : sizeof(zeros));
-                        int r = send(c, zeros, chunk, 0);
-                        if (r <= 0) break;
-                        sent += (unsigned long long)r;
-                    }
+                unsigned long long s = 0, e = RETRY_BODY_SIZE - 1ull;
+                const char *rp = strstr(req, "Range: bytes=");
+                if (rp) {
+                    rp += 13;
+                    s = strtoull(rp, NULL, 10);
+                    const char *dash = strchr(rp, '-');
+                    if (dash && dash[1] >= '0' && dash[1] <= '9')
+                        e = strtoull(dash + 1, NULL, 10);
                 }
+                if (e >= RETRY_BODY_SIZE) e = RETRY_BODY_SIZE - 1ull;
+                if (s > e) s = e;
+                unsigned long long len = e - s + 1ull;
+                char hdr[320];
+                int hl = snprintf(hdr, sizeof(hdr),
+                    "HTTP/1.1 206 Partial Content\r\nContent-Length: %llu\r\n"
+                    "Content-Range: bytes %llu-%llu/%u\r\nAccept-Ranges: bytes\r\n"
+                    "ETag: \"retry\"\r\nConnection: close\r\n\r\n",
+                    len, s, e, (unsigned)RETRY_BODY_SIZE);
+                if (send_all(c, hdr, (size_t)hl))
+                    send_zeros(c, len);
             }
         }
-        closesocket(c);
     }
+    closesocket(c);
     return 0;
 }
 
@@ -2729,7 +2774,8 @@ static void test_segment_honours_retry_after(void) {
         return;
     }
     InterlockedExchange(&g_retry_429_served, 0);
-    HANDLE th = CreateThread(NULL, 0, retry_after_server, (LPVOID)(UINT_PTR)ls, 0, NULL);
+    InterlockedExchange(&g_retry_gets_seen, 0);
+    HANDLE th = start_test_server(ls, retry_conn_proc);
 
     IDM_Engine *eng = engine_create(NULL);
     IDM_Download *dl = eng ? engine_add(eng, "http://127.0.0.1:18479/retry.bin", "retry_after_test.bin", 2, 1) : NULL;

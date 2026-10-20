@@ -129,7 +129,14 @@ retry:
         /* Check if we're done with this segment range */
         if (seg->end > 0 && seg->current > seg->end) break;
 
-        int n = dl_stream_read(conn, buf, SEG_BUF_SIZE);
+        /* هیچ‌وقت بیشتر از باقی‌مانده‌ی range نخون: اگه سرور بیشتر فرستاد (مثلاً Range رو نادیده گرفته)،
+           بایت‌های اضافه نباید روی segment بعدی بنویسن */
+        int want = (int)SEG_BUF_SIZE;
+        if (seg->end > 0) {
+            uint64_t rem = seg->end - seg->current + 1;
+            if (rem < (uint64_t)want) want = (int)rem;
+        }
+        int n = dl_stream_read(conn, buf, want);
         if (n == 0) break;          /* EOF */
         if (n < 0)  {               /* error – یا timeout بعد از Pause، یا شکست واقعی شبکه */
             dl_stream_close(conn);
