@@ -2535,7 +2535,7 @@ static void test_engine_destroy_while_launching(void) {
     HANDLE th = CreateThread(NULL, 0, stall_server_proc, (LPVOID)(UINT_PTR)ls, 0, NULL);
 
     IDM_Engine *eng = engine_create(NULL);
-    IDM_Download *dl = eng ? engine_add(eng, "http://127.0.0.1:18477/stall.bin", "stall_test.bin", 1, 1) : NULL;
+    IDM_Download *dl = eng ? engine_add(eng, "http://127.0.0.1:18477/stall.bin", "stall_test.bin", 1, 0) : NULL;
     TEST("download added and launched", dl != NULL);
     Sleep(800);
     TEST("a launch thread is blocked at destroy time", eng && eng->active_count > 0);
@@ -2698,7 +2698,7 @@ static void test_segment_policy_parks_stuck_range(void) {
     HANDLE th = start_test_server(ls, policy_conn_proc);
 
     IDM_Engine *eng = engine_create(NULL);
-    IDM_Download *dl = eng ? engine_add(eng, "http://127.0.0.1:18478/policy.bin", "policy_test.bin", 4, 1) : NULL;
+    IDM_Download *dl = eng ? engine_add(eng, "http://127.0.0.1:18478/policy.bin", "policy_test.bin", 4, 0) : NULL;
     TEST("download added", dl != NULL);
 
     DL_State st = DL_QUEUED;
@@ -2809,7 +2809,7 @@ static void test_segment_honours_retry_after(void) {
     HANDLE th = start_test_server(ls, retry_conn_proc);
 
     IDM_Engine *eng = engine_create(NULL);
-    IDM_Download *dl = eng ? engine_add(eng, "http://127.0.0.1:18479/retry.bin", "retry_after_test.bin", 2, 1) : NULL;
+    IDM_Download *dl = eng ? engine_add(eng, "http://127.0.0.1:18479/retry.bin", "retry_after_test.bin", 2, 0) : NULL;
     TEST("download added", dl != NULL);
 
     DL_State st = DL_QUEUED;
