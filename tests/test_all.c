@@ -4378,6 +4378,237 @@ static void test_video_sniffer(void) {
 /* ======================================================
    main
    ====================================================== */
+/* ======================================================
+   تست: compaction در سطح container — داده‌ی زنده، ساختار درخت، بدون متن ساده
+   ====================================================== */
+static uint64_t test_file_bytes(const char *path) {
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &a)) return 0;
+    return ((uint64_t)a.nFileSizeHigh << 32) | (uint64_t)a.nFileSizeLow;
+}
+
+static BOOL test_read_file(const char *path, uint8_t **out, size_t *len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return FALSE;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n <= 0) {
+        fclose(f);
+        return FALSE;
+    }
+    uint8_t *buf = (uint8_t *)malloc((size_t)n);
+    BOOL ok = (buf != NULL) && (fread(buf, 1, (size_t)n, f) == (size_t)n);
+    fclose(f);
+    if (!ok) {
+        free(buf);
+        return FALSE;
+    }
+    *out = buf;
+    *len = (size_t)n;
+    return TRUE;
+}
+
+static BOOL test_bytes_contain(const uint8_t *hay, size_t hn, const char *needle) {
+    size_t nn = strlen(needle);
+    if (nn == 0 || hn < nn) return FALSE;
+    for (size_t i = 0; i + nn <= hn; i++) {
+        if (memcmp(hay + i, needle, nn) == 0) return TRUE;
+    }
+    return FALSE;
+}
+
+static void test_tels_compaction(void) {
+    SECTION("Container compaction: live data and tree kept, no plaintext in the new file");
+    const char *SRC   = "tels_test_compact_src.tels";
+    const char *DST   = "tels_test_compact_dst.tels";
+    const char *BUSY  = "tels_test_compact_busy.tels";
+    const char *SMALL = "tels_test_compact_small.tels";
+    DeleteFileA(SRC);
+    DeleteFileA(DST);
+    DeleteFileA(BUSY);
+    DeleteFileA(SMALL);
+
+    TelsContainer *tiny = tels_open(SMALL, TRUE);
+    TEST("small container created", tiny != NULL);
+    if (tiny) {
+        TelsId sa = 0;
+        tels_create(tiny, TELS_ROOT, "a.txt", TELS_TYPE_FILE, &sa);
+        tels_write(tiny, sa, 0, "hello", 5);
+        tels_commit(tiny);
+        TEST("a small container does not need compaction", !tels_should_compact(tiny));
+        tels_close(tiny);
+    }
+    DeleteFileA(SMALL);
+
+    TelsContainer *c = tels_open(SRC, TRUE);
+    TEST("compaction source created", c != NULL);
+    if (!c) return;
+
+    /* ۳۰۰ بار نوشتن و commit روی یک فایل: نسل‌های قدیمی فقط داخل فایل مانده‌اند */
+    static uint8_t block[8192];
+    static uint8_t expect[8192];
+    TelsId churn = 0;
+    tels_create(c, TELS_ROOT, "churn.dat", TELS_TYPE_FILE, &churn);
+    for (uint32_t round = 0; round < 300; round++) {
+        memset(block, (int)(round & 0xFFu), sizeof(block));
+        memcpy(block, "COMPACT-MARKER", 14);
+        tels_write(c, churn, 0, block, sizeof(block));
+        tels_commit(c);
+    }
+    memcpy(expect, block, sizeof(block));
+    TEST("garbage from 300 replacements is detected", tels_should_compact(c));
+
+    TelsId inner = 0, note = 0, sparse = 0, empty = 0, gone = 0;
+    TEST("nested folder created", tels_resolve(c, "docs/inner", TRUE, &inner));
+    tels_create(c, inner, "note.txt", TELS_TYPE_FILE, &note);
+    tels_write(c, note, 0, "nested note", 11);
+    tels_create(c, TELS_ROOT, "sparse.bin", TELS_TYPE_FILE, &sparse);
+    tels_write(c, sparse, 100000, "tail-data", 9);
+    tels_create(c, TELS_ROOT, "empty.bin", TELS_TYPE_FILE, &empty);
+    tels_create(c, TELS_ROOT, "gone.txt", TELS_TYPE_FILE, &gone);
+    tels_write(c, gone, 0, "bye", 3);
+    tels_delete(c, gone);
+    tels_commit(c);
+
+    TEST("compaction writes a new container", tels_compact_to(c, DST));
+    uint64_t src_bytes = test_file_bytes(SRC);
+    tels_close(c);
+    uint64_t dst_bytes = test_file_bytes(DST);
+    TEST("compacted file is far smaller than the source",
+         src_bytes > 0 && dst_bytes > 0 && dst_bytes * 10u < src_bytes);
+
+    TelsContainer *d = tels_open(DST, FALSE);
+    TEST("compacted file opens", d != NULL);
+    if (!d) {
+        DeleteFileA(SRC);
+        DeleteFileA(DST);
+        return;
+    }
+    TEST("compacted file verifies", tels_verify(d));
+
+    uint8_t got[8192];
+    TelsId cid = 0;
+    uint64_t csz = 0;
+    TEST("churn.dat keeps only its newest content",
+         tels_resolve(d, "churn.dat", FALSE, &cid) && tels_size(d, cid, &csz) && csz == sizeof(got) &&
+         tels_read(d, cid, 0, got, sizeof(got)) == (int32_t)sizeof(got) &&
+         memcmp(got, expect, sizeof(got)) == 0);
+
+    char nb[16];
+    memset(nb, 0, sizeof(nb));
+    TelsId nid = 0;
+    TEST("nested folder keeps its file",
+         tels_resolve(d, "docs/inner/note.txt", FALSE, &nid) &&
+         tels_read(d, nid, 0, nb, 11) == 11 && memcmp(nb, "nested note", 11) == 0);
+
+    TelsId sid = 0;
+    uint64_t ssz = 0;
+    TEST("sparse file keeps its size",
+         tels_resolve(d, "sparse.bin", FALSE, &sid) && tels_size(d, sid, &ssz) && ssz == 100009u);
+    TEST("sparse file keeps its hole and its tail",
+         tels_read(d, sid, 0, nb, 16) == 16 && nb[0] == 0 && nb[15] == 0 &&
+         tels_read(d, sid, 100000, nb, 9) == 9 && memcmp(nb, "tail-data", 9) == 0);
+
+    TelsId eid = 0;
+    uint64_t esz = 1;
+    TEST("empty file survives with size 0",
+         tels_resolve(d, "empty.bin", FALSE, &eid) && tels_size(d, eid, &esz) && esz == 0);
+    TelsId xid = 0;
+    TEST("deleted file is not copied", !tels_resolve(d, "gone.txt", FALSE, &xid));
+
+    uint8_t *raw = NULL;
+    size_t rawn = 0;
+    BOOL raw_ok = test_read_file(DST, &raw, &rawn);
+    TEST("compacted file can be read as raw bytes", raw_ok);
+    TEST("compacted file holds no plaintext payload",
+         raw_ok && !test_bytes_contain(raw, rawn, "COMPACT-MARKER"));
+    free(raw);
+
+    TelsId after = 0;
+    TEST("writes work in the compacted file",
+         tels_create(d, TELS_ROOT, "after.txt", TELS_TYPE_FILE, &after) &&
+         tels_write(d, after, 0, "ok", 2) && tels_commit(d));
+    tels_close(d);
+
+    TelsContainer *r = tels_open(DST, FALSE);
+    TelsId aid = 0;
+    char ab[2] = {0, 0};
+    TEST("compacted file reopens with the new write",
+         r != NULL && tels_resolve(r, "after.txt", FALSE, &aid) &&
+         tels_read(r, aid, 0, ab, 2) == 2 && ab[0] == 'o' && ab[1] == 'k');
+    if (r) tels_close(r);
+
+    FILE *bf = fopen(BUSY, "wb");
+    if (bf) {
+        fputs("not a container", bf);
+        fclose(bf);
+    }
+    TelsContainer *s2 = tels_open(DST, FALSE);
+    TEST("compaction refuses an existing destination", s2 != NULL && !tels_compact_to(s2, BUSY));
+    TEST("the existing destination is left alone", test_file_bytes(BUSY) == strlen("not a container"));
+    TEST("the source is unchanged after a refused compaction", s2 != NULL && tels_verify(s2));
+    if (s2) tels_close(s2);
+
+    DeleteFileA(SRC);
+    DeleteFileA(DST);
+    DeleteFileA(BUSY);
+}
+
+/* ======================================================
+   تست: compaction فروشگاه — خودکار، بدون از دست دادن مقدار، حذف فایل موقت کرش‌کرده
+   ====================================================== */
+static void test_store_compaction(void) {
+    SECTION("Store compaction: space reclaimed while writing, every value kept, stale temp removed");
+    const char *SP  = "tels_test_compact_store.tels";
+    const char *SPT = "tels_test_compact_store.tels.compact";
+    lass_store_close();
+    DeleteFileA(SP);
+    DeleteFileA(SPT);
+
+    FILE *leftover = fopen(SPT, "wb");
+    if (leftover) {
+        fputs("leftover from an interrupted compaction", leftover);
+        fclose(leftover);
+    }
+    TEST("store opens next to a stale temp file", lass_store_open(SP));
+    TEST("stale temp file is removed on open", GetFileAttributesA(SPT) == INVALID_FILE_ATTRIBUTES);
+    TEST("value written before the churn", lass_store_put("dl", "keep", "stable-value", 12));
+
+    static uint8_t val[8192];
+    BOOL all_ok = TRUE;
+    for (uint32_t i = 0; i < 300 && all_ok; i++) {
+        memset(val, (int)(i & 0xFFu), sizeof(val));
+        memcpy(val, &i, sizeof(i));
+        all_ok = lass_store_put("q", "state", val, (uint32_t)sizeof(val));
+    }
+    TEST("300 replacements of an 8 KB value all succeed", all_ok);
+    TEST("store file stays far below the 2.4 MB written", test_file_bytes(SP) < 1024u * 1024u);
+
+    uint8_t *got = NULL;
+    uint32_t glen = 0;
+    TEST("newest state survives the compactions",
+         lass_store_get("q", "state", &got, &glen) && glen == sizeof(val) &&
+         memcmp(got, val, sizeof(val)) == 0);
+    free(got);
+    got = NULL;
+    TEST("value written before the churn survives",
+         lass_store_get("dl", "keep", &got, &glen) && glen == 12 && memcmp(got, "stable-value", 12) == 0);
+    free(got);
+    got = NULL;
+
+    lass_store_close();
+    TEST("store reopens after compactions", lass_store_open(SP));
+    TEST("newest state is still there after reopen",
+         lass_store_get("q", "state", &got, &glen) && glen == sizeof(val) &&
+         memcmp(got, val, sizeof(val)) == 0);
+    free(got);
+    lass_store_close();
+    TEST("no temp file is left behind", GetFileAttributesA(SPT) == INVALID_FILE_ATTRIBUTES);
+    DeleteFileA(SP);
+    DeleteFileA(SPT);
+}
+
 int main(void) {
     SetConsoleOutputCP(CP_UTF8);   /* خروجی فارسی و خط تیره درست نمایش داده شود */
     /* داده‌ی تست جدا از داده‌ی واقعی کاربر است: ini، cookies، فروشگاه، رجیستری و استارت به پوشه‌ی موقت می‌روند */
@@ -4430,6 +4661,7 @@ int main(void) {
     test_tels_encryption();
     test_tels_api_edges();
     test_lass_store();
+    test_store_compaction();
     test_state_migration();
     test_engine_destroy_while_launching();
     test_segment_policy_parks_stuck_range();
@@ -4439,6 +4671,7 @@ int main(void) {
     test_http_extract_host();
     test_tels_temp_file();
     test_tels_long_path();
+    test_tels_compaction();
     test_queue_persist();
     test_http_fixup();
     test_filename_security();

@@ -1084,3 +1084,75 @@ BOOL tels_resolve(TelsContainer *c, const char *path, BOOL create_dirs, TelsId *
     if (out) *out = cur;
     return TRUE;
 }
+
+/* ───── compaction ───── */
+
+#define TELS_COMPACT_CHUNK (1024u * 1024u)
+
+/* داده‌ی یک entry فایل را از src می‌خواند و در dst در همان آفست‌های منطقی می‌نویسد */
+static BOOL copy_file_data(TelsContainer *src, TelsContainer *dst, TelsId src_id,
+                           TelsId dst_id, const TelsEntry *e) {
+    uint8_t *buf = (uint8_t *)malloc(TELS_COMPACT_CHUNK);
+    if (!buf) return FALSE;
+    BOOL ok = TRUE;
+    for (uint32_t j = 0; ok && j < e->ext_count; j++) {
+        const TelsExtent *x = &e->ext[j];
+        uint64_t done = 0;
+        while (ok && done < x->len) {
+            uint32_t n = (uint32_t)min64((uint64_t)x->len - done, TELS_COMPACT_CHUNK);
+            uint64_t at = x->off + done;
+            ok = (tels_read(src, src_id, at, buf, n) == (int32_t)n) &&
+                 tels_write(dst, dst_id, at, buf, n);
+            done += n;
+        }
+    }
+    SecureZeroMemory(buf, TELS_COMPACT_CHUNK);
+    free(buf);
+    return ok;
+}
+
+/* فرزندان src_parent را بازگشتی در dst می‌سازد؛ پوشه‌ها و فایل‌های زنده کپی می‌شوند */
+static BOOL copy_children(TelsContainer *src, TelsContainer *dst, TelsId src_parent,
+                          TelsId dst_parent, uint32_t depth) {
+    if (depth > TELS_MAX_DEPTH) return FALSE;
+    for (TelsId i = 1; i < src->next_id && i < src->entry_cap; i++) {
+        const TelsEntry *e = src->entries[i];
+        if (!e || e->parent != src_parent) continue;
+        TelsId nid = 0;
+        if (!tels_create(dst, dst_parent, e->name, (TelsType)e->type, &nid)) return FALSE;
+        if (e->type == TELS_TYPE_FILE) {
+            if (!copy_file_data(src, dst, i, nid, e)) return FALSE;
+        } else if (!copy_children(src, dst, i, nid, depth + 1)) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+BOOL tels_should_compact(TelsContainer *c) {
+    if (!c) return FALSE;
+    EnterCriticalSection(&c->lock);
+    uint64_t live = TELS_DATA_START;
+    for (TelsId i = 1; i < c->next_id && i < c->entry_cap; i++) {
+        const TelsEntry *e = c->entries[i];
+        if (!e) continue;
+        live += TELS_REC_HDR;                        /* سهم تقریبی این entry در index */
+        for (uint32_t j = 0; j < e->ext_count; j++)
+            live += TELS_REC_HDR + (uint64_t)e->ext[j].rec_len;
+    }
+    uint64_t fsize = file_size(c);
+    LeaveCriticalSection(&c->lock);
+    return fsize >= TELS_COMPACT_MIN_BYTES && fsize >= 2u * live;
+}
+
+BOOL tels_compact_to(TelsContainer *src, const char *dst_path) {
+    if (!src || !src->writable || !dst_path || !dst_path[0]) return FALSE;
+    if (GetFileAttributesA(dst_path) != INVALID_FILE_ATTRIBUTES) return FALSE;
+    EnterCriticalSection(&src->lock);
+    TelsContainer *dst = tels_open(dst_path, TRUE);
+    BOOL ok = dst != NULL && copy_children(src, dst, TELS_ROOT, TELS_ROOT, 0) && tels_commit(dst);
+    if (dst) tels_abort(dst);                        /* commit شد یا فایل حذف می‌شود؛ فقط handle آزاد می‌شود */
+    if (!ok) DeleteFileA(dst_path);                  /* فایل ناقص نباید بماند */
+    LeaveCriticalSection(&src->lock);
+    return ok;
+}

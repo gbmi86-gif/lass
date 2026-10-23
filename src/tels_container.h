@@ -55,4 +55,16 @@ BOOL     tels_info(TelsContainer *c, TelsId id, TelsType *type, TelsId *parent,
 /* مسیر "a/b/c" را با جداکننده‌ی '/' یا '\\' می‌پیماید؛ create_dirs=TRUE پوشه‌های گم‌شده را می‌سازد */
 BOOL     tels_resolve(TelsContainer *c, const char *path, BOOL create_dirs, TelsId *out);
 
+/* ───── compaction ─────
+   فایل فقط‌افزودنی است: هر نوشتن یا حذف، رکورد تازه می‌سازد و رکورد قدیمی در فایل
+   می‌ماند. tels_should_compact وقتی TRUE است که فایل دست‌کم TELS_COMPACT_MIN_BYTES
+   باشد و بیش از نیمه‌اش داده‌ی ارجاع‌نشده باشد. */
+#define TELS_COMPACT_MIN_BYTES (1024u * 1024u)
+
+/* TRUE یعنی بازنویسی فایل ارزش دارد */
+BOOL     tels_should_compact(TelsContainer *c);
+/* همه‌ی entry های زنده‌ی src را در container تازه‌ای در dst_path کپی و commit می‌کند.
+   dst_path نباید وجود داشته باشد؛ container تازه کلید خودش را دارد و src دست‌نخورده می‌ماند. */
+BOOL     tels_compact_to(TelsContainer *src, const char *dst_path);
+
 #endif

@@ -18,6 +18,7 @@
 #define STORE_GEN_DIGITS 20u
 
 static TelsContainer    *g_store = NULL;
+static char              g_store_path[MAX_PATH + 16];
 static CRITICAL_SECTION  g_store_lock;
 static volatile LONG     g_store_lock_state = 0;   /* 0 خام، 1 در حال ساخت، 2 آماده */
 
@@ -102,6 +103,88 @@ static void delete_gens_except(TelsContainer *c, TelsId dir, const char *name, u
     free(ids);
 }
 
+/* ───── compaction ─────
+   lass.tels فقط‌افزودنی است و داده‌ی قدیمی را نگه می‌دارد. وقتی فایل بزرگ شد و بیشترش
+   بلااستفاده بود، داده‌ی زنده در فایل موقت <lass.tels>.compact کپی می‌شود و همان فایل با
+   MoveFileEx جای lass.tels را می‌گیرد. اگر وسط کار کرش شود lass.tels دست‌نخورده است و
+   فایل موقت در بازشدن بعدی حذف می‌شود. */
+
+#define STORE_COMPACT_SUFFIX ".compact"
+#define STORE_REPLACE_TRIES  10
+#define STORE_REPLACE_WAIT   100u
+
+/* مسیر فایل store را برای compaction نگه می‌دارد؛ مسیر خیلی بلند یعنی compaction غیرفعال */
+static void store_set_path(const char *path) {
+    size_t n = strlen(path);
+    if (n + sizeof(STORE_COMPACT_SUFFIX) > sizeof(g_store_path)) {
+        g_store_path[0] = '\0';
+        return;
+    }
+    memcpy(g_store_path, path, n + 1u);
+}
+
+/* نام فایل موقت compaction را در buf می‌نویسد */
+static void store_temp_path(char *buf, size_t sz) {
+    snprintf(buf, sz, "%s%s", g_store_path, STORE_COMPACT_SUFFIX);
+}
+
+static uint64_t store_file_bytes(const char *path) {
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &a)) return 0;
+    return ((uint64_t)a.nFileSizeHigh << 32) | (uint64_t)a.nFileSizeLow;
+}
+
+/* فایل موقت باقی‌مانده از compaction کرش‌کرده را حذف می‌کند */
+static void store_remove_stale_temp(void) {
+    if (!g_store_path[0]) return;
+    char tmp[sizeof(g_store_path) + sizeof(STORE_COMPACT_SUFFIX)];
+    store_temp_path(tmp, sizeof(tmp));
+    if (GetFileAttributesA(tmp) != INVALID_FILE_ATTRIBUTES) {
+        DeleteFileA(tmp);
+        LOGW(LOG_MOD_CORE, "store: removed a temporary file left by an interrupted compaction");
+    }
+}
+
+/* g_store_lock باید گرفته شده باشد. اگر فایل نیاز داشته باشد بازنویسی می‌کند.
+   خطاها فقط لاگ می‌شوند؛ در آن صورت فایل قبلی سر جایش می‌ماند و store کار می‌کند. */
+static void store_maybe_compact_locked(void) {
+    if (!g_store || !g_store_path[0] || !tels_should_compact(g_store)) return;
+
+    char tmp[sizeof(g_store_path) + sizeof(STORE_COMPACT_SUFFIX)];
+    store_temp_path(tmp, sizeof(tmp));
+    uint64_t before = store_file_bytes(g_store_path);
+
+    DeleteFileA(tmp);
+    if (!tels_compact_to(g_store, tmp)) {
+        LOGW(LOG_MOD_CORE, "store: compaction failed, the store file is unchanged");
+        return;
+    }
+
+    /* محتوای فایل قبلاً commit شده؛ حالا می‌بندیم تا جایگزینی ممکن شود */
+    tels_close(g_store);
+    g_store = NULL;
+
+    BOOL moved = FALSE;
+    for (int i = 0; i < STORE_REPLACE_TRIES && !moved; i++) {
+        moved = MoveFileExA(tmp, g_store_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        if (!moved) Sleep(STORE_REPLACE_WAIT);
+    }
+    if (!moved) {
+        DeleteFileA(tmp);
+        LOGW(LOG_MOD_CORE, "store: compaction could not replace the file, keeping the old one");
+    }
+
+    g_store = tels_open(g_store_path, FALSE);
+    if (!g_store) {
+        LOGE(LOG_MOD_CORE, "store: cannot reopen %s after compaction", g_store_path);
+        return;
+    }
+    if (moved) {
+        LOGI(LOG_MOD_CORE, "store: compacted %s from %llu to %llu bytes", g_store_path,
+             (unsigned long long)before, (unsigned long long)store_file_bytes(g_store_path));
+    }
+}
+
 BOOL lass_store_open(const char *path) {
     if (!path || !path[0]) return FALSE;
     store_lock_init();
@@ -110,10 +193,13 @@ BOOL lass_store_open(const char *path) {
         tels_close(g_store);
         g_store = NULL;
     }
-    TelsContainer *c = tels_open(path, TRUE);
-    g_store = c;
+    store_set_path(path);
+    store_remove_stale_temp();
+    g_store = tels_open(path, TRUE);
+    store_maybe_compact_locked();
+    BOOL ok = (g_store != NULL);
     LeaveCriticalSection(&g_store_lock);
-    if (!c) {
+    if (!ok) {
         LOGE(LOG_MOD_CORE, "store: cannot open %s (damaged, or written by another user or machine)", path);
         return FALSE;
     }
@@ -179,6 +265,7 @@ BOOL lass_store_put(const char *dir, const char *name, const void *data, uint32_
             }
         }
     }
+    if (ok) store_maybe_compact_locked();
     LeaveCriticalSection(&g_store_lock);
     return ok;
 }
@@ -248,6 +335,7 @@ BOOL lass_store_delete(const char *dir, const char *name) {
             ok = TRUE;   /* پوشه وجود ندارد یعنی چیزی برای حذف نیست */
         }
     }
+    if (ok) store_maybe_compact_locked();
     LeaveCriticalSection(&g_store_lock);
     return ok;
 }
