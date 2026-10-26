@@ -1,22 +1,11 @@
 /* plugin_hls.c
    ─────────────────────────────────────────────────────────────
-   HLS / M3U8 Download Plugin  –  pure WinINet, no lib
+   HLS / M3U8: تشخیص URL، parse کامل playlist و پلاگین.
+   بدون lib خارجی (فقط WinINet برای sniffer).
 
-   مراحل:
-     1. hls_fetch_playlist: دانلود و parse m3u8
-     2. اگه master بود: hls_resolve_best بهترین variant رو انتخاب کنه
-     3. hls_download: هر segment رو دانلود کنه و concat کنه
-
-   فرمت m3u8 (ساده):
-     #EXTM3U
-     #EXT-X-STREAM-INF:BANDWIDTH=1280000,RESOLUTION=720x480
-     http://...720p.m3u8
-     ...
-     یا:
-     #EXTINF:9.009,
-     http://media.example.com/first.ts
-     ...
-     #EXT-X-ENDLIST
+   دانلود کامل جریان در src/hls_download.c است؛ این فایل فقط
+   playlist را می‌فهمد و نتیجه را گزارش می‌دهد. parse دیگر از
+   strtok استفاده نمی‌کند، پس امن برای چند thread است.
    ─────────────────────────────────────────────────────────────
 */
 #ifndef WIN32_LEAN_AND_MEAN
@@ -27,44 +16,45 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 
 #include "plugin_hls.h"
 #include "../src/lass_log.h"
 #include "../src/types.h"
 
-#define HLS_FETCH_BUF  (512 * 1024)  /* 512KB برای دانلود playlist */
-#define HLS_SEG_BUF    (64  * 1024)  /* 64KB read buffer */
+#define HLS_FETCH_BUF  (512 * 1024)   /* سقف متن playlist در مسیر sniffer */
 
 /* ======================================================
-   HTTP helper ساده برای دانلود متن
+   HTTP helper ساده برای متن (فقط sniffer)
    ====================================================== */
 static char *hls_http_get_text(const char *url, int *out_len) {
     if (!url || !out_len) return NULL;
     *out_len = 0;
 
     HINTERNET hInet = InternetOpenA("Lass/HLS",
-                                     INTERNET_OPEN_TYPE_PRECONFIG,
-                                     NULL, NULL, 0);
+                                    INTERNET_OPEN_TYPE_PRECONFIG,
+                                    NULL, NULL, 0);
     if (!hInet) return NULL;
 
     DWORD to = 20000;
     InternetSetOptionA(hInet, INTERNET_OPTION_CONNECT_TIMEOUT, &to, sizeof(to));
     InternetSetOptionA(hInet, INTERNET_OPTION_RECEIVE_TIMEOUT, &to, sizeof(to));
 
-    HINTERNET hUrl = InternetOpenUrlA(hInet, url,
-                                       NULL, 0,
-                                       INTERNET_FLAG_RELOAD |
-                                       INTERNET_FLAG_NO_CACHE_WRITE, 0);
+    HINTERNET hUrl = InternetOpenUrlA(hInet, url, NULL, 0,
+                                      INTERNET_FLAG_RELOAD |
+                                      INTERNET_FLAG_NO_CACHE_WRITE, 0);
     if (!hUrl) { InternetCloseHandle(hInet); return NULL; }
 
-    char  *buf  = (char *)malloc(HLS_FETCH_BUF + 1);
+    char  *buf   = (char *)malloc(HLS_FETCH_BUF + 1);
     int    total = 0;
     DWORD  read  = 0;
-
+    if (!buf) {
+        InternetCloseHandle(hUrl);
+        InternetCloseHandle(hInet);
+        return NULL;
+    }
     while (total < HLS_FETCH_BUF) {
         if (!InternetReadFile(hUrl, buf + total,
-                              HLS_FETCH_BUF - total, &read) || read == 0)
+                              (DWORD)(HLS_FETCH_BUF - total), &read) || read == 0)
             break;
         total += (int)read;
     }
@@ -77,31 +67,28 @@ static char *hls_http_get_text(const char *url, int *out_len) {
 }
 
 /* ======================================================
-   URL resolution: relative → absolute
+   حل آدرس نسبی به مطلق
    ====================================================== */
 static void hls_resolve_url(const char *base, const char *rel,
-                              char *out, int out_sz) {
+                            char *out, int out_sz) {
     if (!base || !rel || !out) return;
 
-    if (_strnicmp(rel, "http://", 7) == 0 ||
-        _strnicmp(rel, "https://", 8) == 0) {
-        /* مطلق */
+    if (_strnicmp(rel, "http://", 7) == 0 || _strnicmp(rel, "https://", 8) == 0) {
         snprintf(out, out_sz, "%s", rel);
         return;
     }
 
     if (rel[0] == '/') {
-        /* از ریشه دامنه */
+        /* از ریشه‌ی دامنه */
         const char *scheme_end = strstr(base, "://");
         if (!scheme_end) { snprintf(out, out_sz, "%s", rel); return; }
         const char *host_end = strchr(scheme_end + 3, '/');
-        int prefix_len = host_end ? (int)(host_end - base)
-                                  : (int)strlen(base);
+        int prefix_len = host_end ? (int)(host_end - base) : (int)strlen(base);
         snprintf(out, out_sz, "%.*s%s", prefix_len, base, rel);
         return;
     }
 
-    /* نسبی: پیدا کردن directory base */
+    /* نسبی: پوشه‌ی base */
     const char *last_slash = strrchr(base, '/');
     if (last_slash) {
         int dir_len = (int)(last_slash - base) + 1;
@@ -112,109 +99,298 @@ static void hls_resolve_url(const char *base, const char *rel,
 }
 
 /* ======================================================
-   Parse M3U8
+   کمک‌های parse
    ====================================================== */
-static void hls_parse_stream_inf(const char *line, HLS_Variant *v) {
-    /* BANDWIDTH= */
-    const char *bw = strstr(line, "BANDWIDTH=");
-    if (bw) v->bandwidth = atoi(bw + 10);
-
-    /* RESOLUTION= */
-    const char *res = strstr(line, "RESOLUTION=");
-    if (res) sscanf(res + 11, "%dx%d", &v->width, &v->height);
-
-    /* CODECS= */
-    const char *cod = strstr(line, "CODECS=\"");
-    if (cod) {
-        cod += 8;
-        const char *end = strchr(cod, '"');
-        if (end) {
-            int len = (int)(end - cod);
-            if (len >= (int)sizeof(v->codecs)) len = (int)sizeof(v->codecs) - 1;
-            memcpy(v->codecs, cod, len);
-            v->codecs[len] = '\0';
-        }
-    }
+static int hls_hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
 }
 
-IDM_Result hls_fetch_playlist(const char *url, HLS_Playlist *out) {
-    if (!url || !out) return IDM_ERR_INVALID;
-    memset(out, 0, sizeof(*out));
-
-    /* base URL */
-    snprintf(out->base_url, sizeof(out->base_url), "%s", url);
-    char *last_slash = strrchr(out->base_url, '/');
-    if (last_slash) *(last_slash + 1) = '\0';
-
-    int   text_len = 0;
-    char *text = hls_http_get_text(url, &text_len);
-    if (!text || text_len < 7) {
-        free(text);
-        return IDM_ERR_NETWORK;
+/* IV به شکل 0x و ۳۲ رقم هگز */
+static BOOL hls_parse_iv(const char *s, uint8_t out[16]) {
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    if (strlen(s) != 32) return FALSE;
+    for (int i = 0; i < 16; i++) {
+        int hi = hls_hexval(s[2 * i]);
+        int lo = hls_hexval(s[2 * i + 1]);
+        if (hi < 0 || lo < 0) return FALSE;
+        out[i] = (uint8_t)((hi << 4) | lo);
     }
+    return TRUE;
+}
 
-    /* بررسی اینکه واقعاً m3u8 هست */
-    if (strncmp(text, "#EXTM3U", 7) != 0) {
-        free(text);
+/* مقدار یک attribute از خط تگ؛ مقدار داخل کوتیشن هم خوانده می‌شود */
+static BOOL hls_attr(const char *attrs, const char *name, char *out, size_t out_sz) {
+    size_t nl = strlen(name);
+    const char *p = attrs;
+    while (*p) {
+        while (*p == ',' || *p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        const char *kbeg = p;
+        while (*p && *p != '=' && *p != ',') p++;
+        size_t kl = (size_t)(p - kbeg);
+        if (*p != '=') continue;        /* attribute بدون مقدار */
+        p++;                            /* از '=' رد شو */
+        const char *vbeg;
+        size_t vl;
+        if (*p == '"') {
+            p++;
+            vbeg = p;
+            while (*p && *p != '"') p++;
+            vl = (size_t)(p - vbeg);
+            if (*p == '"') p++;
+        } else {
+            vbeg = p;
+            while (*p && *p != ',') p++;
+            vl = (size_t)(p - vbeg);
+        }
+        if (kl == nl && _strnicmp(kbeg, name, nl) == 0) {
+            if (vl >= out_sz) return FALSE;
+            memcpy(out, vbeg, vl);
+            out[vl] = '\0';
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* EXT-X-BYTERANGE:<n>[@<o>] */
+static BOOL hls_parse_byterange(const char *v, uint64_t *len, uint64_t *off, BOOL *has_off) {
+    char *end = NULL;
+    unsigned long long n = strtoull(v, &end, 10);
+    if (end == v || n == 0) return FALSE;
+    *len = (uint64_t)n;
+    *off = 0;
+    *has_off = FALSE;
+    if (*end == '@') {
+        char *end2 = NULL;
+        unsigned long long o = strtoull(end + 1, &end2, 10);
+        if (end2 == end + 1) return FALSE;
+        *off = (uint64_t)o;
+        *has_off = TRUE;
+    }
+    return TRUE;
+}
+
+/* EXT-X-KEY: METHOD=NONE یعنی رمزنشده؛ AES-128 با کلید؛ بقیه ناپشتیبانی‌شده */
+static IDM_Result hls_handle_key(const char *url, const char *attrs,
+                                 HLS_Playlist *out, int *cur_key) {
+    char method[32] = "", uri[HLS_MAX_URL] = "", iv_s[64] = "", fmt[64] = "";
+    hls_attr(attrs, "METHOD", method, sizeof(method));
+    if (method[0] == '\0' || _stricmp(method, "NONE") == 0) {
+        *cur_key = -1;
+        return IDM_OK;
+    }
+    if (_stricmp(method, "AES-128") != 0) {
+        snprintf(out->unsupported, sizeof(out->unsupported),
+                 "encryption method %s is not supported", method);
+        *cur_key = -1;
+        return IDM_OK;
+    }
+    hls_attr(attrs, "KEYFORMAT", fmt, sizeof(fmt));
+    if (fmt[0] && _stricmp(fmt, "identity") != 0) {
+        snprintf(out->unsupported, sizeof(out->unsupported),
+                 "key format %s is not supported (DRM)", fmt);
+        *cur_key = -1;
+        return IDM_OK;
+    }
+    if (!hls_attr(attrs, "URI", uri, sizeof(uri)) || uri[0] == '\0')
         return IDM_ERR_INVALID;
+    hls_attr(attrs, "IV", iv_s, sizeof(iv_s));
+
+    HLS_Key k;
+    memset(&k, 0, sizeof(k));
+    char abs_uri[HLS_MAX_URL];
+    hls_resolve_url(url, uri, abs_uri, sizeof(abs_uri));
+    snprintf(k.uri, sizeof(k.uri), "%s", abs_uri);
+    if (iv_s[0]) {
+        if (!hls_parse_iv(iv_s, k.iv)) return IDM_ERR_INVALID;
+        k.has_iv = TRUE;
     }
 
-    /* parse خط‌به‌خط */
-    char *line = strtok(text, "\n");
-    HLS_Variant pending_variant = {0};
-    BOOL has_pending_variant = FALSE;
+    for (int i = 0; i < out->key_count; i++) {
+        const HLS_Key *e = &out->keys[i];
+        if (strcmp(e->uri, k.uri) == 0 && e->has_iv == k.has_iv &&
+            (!k.has_iv || memcmp(e->iv, k.iv, sizeof(k.iv)) == 0)) {
+            *cur_key = i;
+            return IDM_OK;
+        }
+    }
+    if (out->key_count >= HLS_MAX_KEYS) {
+        snprintf(out->unsupported, sizeof(out->unsupported), "too many encryption keys");
+        *cur_key = -1;
+        return IDM_OK;
+    }
+    out->keys[out->key_count] = k;
+    *cur_key = out->key_count++;
+    return IDM_OK;
+}
 
-    while (line) {
-        /* trim \r */
-        int ll = (int)strlen(line);
-        while (ll > 0 && (line[ll-1] == '\r' || line[ll-1] == ' '))
-            line[--ll] = '\0';
+/* EXT-X-MAP: بخش init؛ با BYTERANGE پشتیبانی نمی‌شود */
+static IDM_Result hls_handle_map(const char *url, const char *attrs,
+                                 HLS_Playlist *out, int *cur_map) {
+    char uri[HLS_MAX_URL] = "", br[32] = "";
+    if (!hls_attr(attrs, "URI", uri, sizeof(uri)) || uri[0] == '\0')
+        return IDM_ERR_INVALID;
+    if (hls_attr(attrs, "BYTERANGE", br, sizeof(br))) {
+        snprintf(out->unsupported, sizeof(out->unsupported),
+                 "init section with a byte range is not supported");
+        *cur_map = -1;
+        return IDM_OK;
+    }
+    char abs_uri[HLS_MAX_URL];
+    hls_resolve_url(url, uri, abs_uri, sizeof(abs_uri));
+    for (int i = 0; i < out->map_count; i++) {
+        if (strcmp(out->maps[i].uri, abs_uri) == 0) {
+            *cur_map = i;
+            return IDM_OK;
+        }
+    }
+    if (out->map_count >= HLS_MAX_MAPS) {
+        snprintf(out->unsupported, sizeof(out->unsupported), "too many init sections");
+        *cur_map = -1;
+        return IDM_OK;
+    }
+    snprintf(out->maps[out->map_count].uri, sizeof(out->maps[out->map_count].uri),
+             "%s", abs_uri);
+    *cur_map = out->map_count++;
+    return IDM_OK;
+}
 
-        if (ll == 0) { line = strtok(NULL, "\n"); continue; }
+/* ======================================================
+   parse کامل playlist (master یا media)
+   ====================================================== */
+IDM_Result hls_parse_text(const char *url, const char *text, int len, HLS_Playlist *out) {
+    if (!url || !text || !out || len < 7) return IDM_ERR_INVALID;
+    if (strncmp(text, "#EXTM3U", 7) != 0) return IDM_ERR_INVALID;
 
-        if (strncmp(line, "#EXT-X-STREAM-INF:", 18) == 0) {
-            /* master playlist variant */
-            out->is_master = TRUE;
-            memset(&pending_variant, 0, sizeof(pending_variant));
-            hls_parse_stream_inf(line + 18, &pending_variant);
-            has_pending_variant = TRUE;
+    snprintf(out->base_url, sizeof(out->base_url), "%s", url);
+    char *slash = strrchr(out->base_url, '/');
+    if (slash) *(slash + 1) = '\0';
 
-        } else if (strncmp(line, "#EXTINF:", 8) == 0) {
-            /* media segment */
-            if (out->segment_count < HLS_MAX_SEGMENTS) {
-                double dur = atof(line + 8);
-                out->segments[out->segment_count].duration = dur;
-                out->segments[out->segment_count].index    = out->segment_count;
-                out->total_duration += dur;
+    int         cur_key        = -1;
+    int         cur_map        = -1;
+    BOOL        pend_variant   = FALSE;
+    HLS_Variant pv;
+    memset(&pv, 0, sizeof(pv));
+    double      pend_dur       = 0.0;
+    BOOL        have_dur       = FALSE;
+    BOOL        pend_range     = FALSE;
+    BOOL        pend_range_off = FALSE;
+    uint64_t    pend_range_len = 0;
+    uint64_t    pend_range_off_v = 0;
+    char        last_range_uri[HLS_MAX_URL] = "";
+    uint64_t    last_range_end = 0;
+
+    const char *end = text + len;
+    const char *p = text;
+    while (p < end) {
+        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+        const char *ls = p;
+        const char *le = nl ? nl : end;
+        p = nl ? nl + 1 : end;
+        while (ls < le && (*ls == ' ' || *ls == '\t' || *ls == '\r')) ls++;
+        while (le > ls && (le[-1] == ' ' || le[-1] == '\t' || le[-1] == '\r')) le--;
+        size_t ll = (size_t)(le - ls);
+        if (ll == 0) continue;
+        if (ll >= HLS_MAX_URL) return IDM_ERR_INVALID;
+
+        char line[HLS_MAX_URL];
+        memcpy(line, ls, ll);
+        line[ll] = '\0';
+
+        if (line[0] == '#') {
+            if (strncmp(line, "#EXT-X-STREAM-INF:", 18) == 0) {
+                const char *a = line + 18;
+                char buf[64];
+                memset(&pv, 0, sizeof(pv));
+                if (hls_attr(a, "BANDWIDTH", buf, sizeof(buf))) pv.bandwidth = atoi(buf);
+                if (hls_attr(a, "RESOLUTION", buf, sizeof(buf)))
+                    sscanf(buf, "%dx%d", &pv.width, &pv.height);
+                hls_attr(a, "CODECS", pv.codecs, sizeof(pv.codecs));
+                hls_attr(a, "AUDIO", pv.audio_group, sizeof(pv.audio_group));
+                pend_variant = TRUE;
+                out->is_master = TRUE;
+            } else if (strncmp(line, "#EXT-X-MEDIA:", 13) == 0) {
+                char type[32], uri[HLS_MAX_URL];
+                if (hls_attr(line + 13, "TYPE", type, sizeof(type)) &&
+                    _stricmp(type, "AUDIO") == 0 &&
+                    hls_attr(line + 13, "URI", uri, sizeof(uri)))
+                    out->has_separate_audio = TRUE;
+            } else if (strncmp(line, "#EXTINF:", 8) == 0) {
+                pend_dur = strtod(line + 8, NULL);
+                have_dur = TRUE;
+            } else if (strncmp(line, "#EXT-X-BYTERANGE:", 17) == 0) {
+                uint64_t blen = 0, boff = 0;
+                BOOL has_off = FALSE;
+                if (!hls_parse_byterange(line + 17, &blen, &boff, &has_off))
+                    return IDM_ERR_INVALID;
+                pend_range = TRUE;
+                pend_range_len = blen;
+                pend_range_off = has_off;
+                pend_range_off_v = boff;
+            } else if (strncmp(line, "#EXT-X-KEY:", 11) == 0) {
+                IDM_Result kr = hls_handle_key(url, line + 11, out, &cur_key);
+                if (kr != IDM_OK) return kr;
+            } else if (strncmp(line, "#EXT-X-MAP:", 11) == 0) {
+                IDM_Result mr = hls_handle_map(url, line + 11, out, &cur_map);
+                if (mr != IDM_OK) return mr;
+            } else if (strncmp(line, "#EXT-X-MEDIA-SEQUENCE:", 22) == 0) {
+                out->media_sequence = (uint64_t)strtoull(line + 22, NULL, 10);
+            } else if (strncmp(line, "#EXT-X-TARGETDURATION:", 22) == 0) {
+                out->target_duration = atoi(line + 22);
+            } else if (strcmp(line, "#EXT-X-ENDLIST") == 0) {
+                out->is_endlist = TRUE;
             }
-
-        } else if (strncmp(line, "#EXT-X-TARGETDURATION:", 22) == 0) {
-            out->target_duration = atoi(line + 22);
-
-        } else if (strcmp(line, "#EXT-X-ENDLIST") == 0) {
-            out->is_endlist = TRUE;
-
-        } else if (line[0] != '#') {
-            /* URL (variant یا segment) */
-            char resolved[HLS_MAX_URL];
-            hls_resolve_url(url, line, resolved, sizeof(resolved));
-
-            if (has_pending_variant && out->variant_count < HLS_MAX_VARIANTS) {
-                snprintf(pending_variant.url, sizeof(pending_variant.url),
-                         "%s", resolved);
-                out->variants[out->variant_count++] = pending_variant;
-                has_pending_variant = FALSE;
-            } else if (out->segment_count < HLS_MAX_SEGMENTS) {
-                snprintf(out->segments[out->segment_count].url,
-                         sizeof(out->segments[0].url), "%s", resolved);
-                out->segment_count++;
-            }
+            continue;
         }
 
-        line = strtok(NULL, "\n");
-    }
+        /* خط URI: variant یا segment */
+        char abs_uri[HLS_MAX_URL];
+        hls_resolve_url(url, line, abs_uri, sizeof(abs_uri));
 
-    free(text);
+        if (pend_variant) {
+            if (out->variant_count >= HLS_MAX_VARIANTS) {
+                snprintf(out->unsupported, sizeof(out->unsupported),
+                         "too many quality variants");
+                return IDM_OK;
+            }
+            snprintf(pv.url, sizeof(pv.url), "%s", abs_uri);
+            out->variants[out->variant_count++] = pv;
+            pend_variant = FALSE;
+            continue;
+        }
+
+        if (out->segment_count >= HLS_MAX_SEGMENTS) {
+            snprintf(out->unsupported, sizeof(out->unsupported),
+                     "playlist has more than %d segments", HLS_MAX_SEGMENTS);
+            return IDM_OK;
+        }
+        HLS_Segment *s = &out->segments[out->segment_count];
+        memset(s, 0, sizeof(*s));
+        snprintf(s->url, sizeof(s->url), "%s", abs_uri);
+        s->duration  = have_dur ? pend_dur : 0.0;
+        s->index     = out->segment_count;
+        s->key_index = cur_key;
+        s->map_index = cur_map;
+        s->media_seq = out->media_sequence + (uint64_t)out->segment_count;
+        if (pend_range) {
+            uint64_t off = pend_range_off ? pend_range_off_v
+                         : (strcmp(last_range_uri, s->url) == 0 ? last_range_end : 0u);
+            s->has_range = TRUE;
+            s->range_off = off;
+            s->range_len = pend_range_len;
+            snprintf(last_range_uri, sizeof(last_range_uri), "%s", s->url);
+            last_range_end = off + pend_range_len;
+        }
+        out->total_duration += s->duration;
+        out->segment_count++;
+        have_dur = FALSE;
+        pend_range = FALSE;
+        pend_range_off = FALSE;
+    }
 
     /* بهترین variant = بالاترین bandwidth */
     if (out->variant_count > 0) {
@@ -227,112 +403,31 @@ IDM_Result hls_fetch_playlist(const char *url, HLS_Playlist *out) {
         }
     }
 
-    LOGI(LOG_MOD_HLS, "Parsed: %s | segments=%d variants=%d duration=%.1fs",
-         out->is_master ? "master" : "media",
-         out->segment_count, out->variant_count, out->total_duration);
-
+    LOGI(LOG_MOD_HLS, "Parsed: %s | segments=%d variants=%d keys=%d maps=%d endlist=%d",
+         out->is_master ? "master" : "media", out->segment_count,
+         out->variant_count, out->key_count, out->map_count, (int)out->is_endlist);
     return IDM_OK;
 }
 
-IDM_Result hls_resolve_best(HLS_Playlist *pl, HLS_Playlist *media_out) {
-    if (!pl || !media_out) return IDM_ERR_INVALID;
-    if (!pl->is_master || pl->variant_count == 0) {
-        /* از قبل media playlist بود */
-        *media_out = *pl;
-        return IDM_OK;
-    }
-    const char *best_url = pl->variants[pl->best_variant].url;
-    LOGI(LOG_MOD_HLS, "Best variant: %d bps  %dx%d  %s",
-         pl->variants[pl->best_variant].bandwidth,
-         pl->variants[pl->best_variant].width,
-         pl->variants[pl->best_variant].height,
-         best_url);
-    return hls_fetch_playlist(best_url, media_out);
-}
-
 /* ======================================================
-   hls_download  –  دانلود + concat همه segments
+   دانلود متن playlist برای sniffer (بدون هدر و کوکی دانلود)
    ====================================================== */
-IDM_Result hls_download(const char    *playlist_url,
-                         const char    *out_path,
-                         int            max_threads,
-                         HLS_ProgressCb on_progress,
-                         void          *userdata) {
-    if (!playlist_url || !out_path) return IDM_ERR_INVALID;
-    if (max_threads < 1) max_threads = 1;
-    if (max_threads > 8) max_threads = 8;
-
-    /* ── ۱. fetch playlist — روی heap (هر HLS_Playlist ~8MB روی stack!) ── */
-    HLS_Playlist *pl = (HLS_Playlist *)calloc(1, sizeof(HLS_Playlist));
-    HLS_Playlist *media_pl = (HLS_Playlist *)calloc(1, sizeof(HLS_Playlist));
-    if (!pl || !media_pl) { free(pl); free(media_pl); return IDM_ERR_INVALID; }
-
-    IDM_Result r = hls_fetch_playlist(playlist_url, pl);
-    if (r != IDM_OK) { free(pl); free(media_pl); return r; }
-
-    r = hls_resolve_best(pl, media_pl);
-    if (r != IDM_OK) { free(pl); free(media_pl); return r; }
-
-    if (media_pl->segment_count == 0) { free(pl); free(media_pl); return IDM_ERR_INVALID; }
-
-    LOGI(LOG_MOD_HLS, "Downloading %d segments to %s",
-         media_pl->segment_count, out_path);
-
-    /* ── ۲. باز کردن فایل خروجی ── */
-    HANDLE hOut = CreateFileA(out_path,
-                               GENERIC_WRITE, 0, NULL,
-                               CREATE_ALWAYS,
-                               FILE_ATTRIBUTE_NORMAL |
-                               FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    if (hOut == INVALID_HANDLE_VALUE) { free(pl); free(media_pl); return IDM_ERR_IO; }
-
-    int done = 0;
-
-    for (int i = 0; i < media_pl->segment_count; i++) {
-        const char *seg_url = media_pl->segments[i].url;
-        if (!seg_url[0]) continue;
-
-        int   text_len = 0;
-        char *data = hls_http_get_text(seg_url, &text_len);
-
-        if (!data || text_len == 0) {
-            LOGW(LOG_MOD_HLS, "Failed segment #%d: %s", i, seg_url);
-            free(data);
-            Sleep(500);
-            data = hls_http_get_text(seg_url, &text_len);
-        }
-
-        if (data && text_len > 0) {
-            DWORD written = 0;
-            WriteFile(hOut, data, (DWORD)text_len, &written, NULL);
-            free(data);
-        } else {
-            free(data);
-            CloseHandle(hOut);
-            free(pl); free(media_pl);
-            return IDM_ERR_NETWORK;
-        }
-
-        done++;
-        if (on_progress)
-            on_progress(done, media_pl->segment_count, userdata);
-
-        if (done % 10 == 0)
-            LOGI(LOG_MOD_HLS, "Progress: %d/%d segments",
-                 done, media_pl->segment_count);
+IDM_Result hls_fetch_playlist(const char *url, HLS_Playlist *out) {
+    if (!url || !out) return IDM_ERR_INVALID;
+    memset(out, 0, sizeof(*out));
+    int text_len = 0;
+    char *text = hls_http_get_text(url, &text_len);
+    if (!text || text_len < 7) {
+        free(text);
+        return IDM_ERR_NETWORK;
     }
-
-    CloseHandle(hOut);
-    LOGI(LOG_MOD_HLS, "Complete: %d segments, %.1f seconds",
-         media_pl->segment_count, media_pl->total_duration);
-
-    free(pl);
-    free(media_pl);
-    return IDM_OK;
+    IDM_Result r = hls_parse_text(url, text, text_len, out);
+    free(text);
+    return r;
 }
 
 /* ======================================================
-   تشخیص HLS URL
+   تشخیص HLS URL و محتوا
    ====================================================== */
 BOOL hls_is_m3u8_url(const char *url) {
     if (!url) return FALSE;
@@ -340,8 +435,7 @@ BOOL hls_is_m3u8_url(const char *url) {
     int base_len = q ? (int)(q - url) : (int)strlen(url);
 
     /* پسوند .m3u8 */
-    if (base_len >= 5 &&
-        _strnicmp(url + base_len - 5, ".m3u8", 5) == 0)
+    if (base_len >= 5 && _strnicmp(url + base_len - 5, ".m3u8", 5) == 0)
         return TRUE;
 
     /* یا پارامتر type=m3u8 در query */

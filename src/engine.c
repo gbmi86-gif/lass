@@ -42,6 +42,7 @@
 #include "shutdown_brake.h"
 #include "../plugins/security_fixes.h"
 #include "transport.h"
+#include "hls_download.h"
 #include "url_secure.h"
 #include "secure_store.h"
 
@@ -218,11 +219,113 @@ static const char *idm_result_name(IDM_Result r) {
     }
 }
 
+/* ══════════════════════════════════════════════════════
+   HLS: دانلود کامل جریان در همان launch thread
+   ──────────────────────────────────────────────────────
+   این مسیر discovery و segment های HTTP معمولی را نمی‌خواهد؛
+   hls_download_run تمام کار را انجام می‌دهد و با should_stop به
+   تغییر وضعیت (pause، cancel، remove، خاموش شدن) پاسخ می‌دهد.
+   حسابداری active_count مثل بقیه‌ی مسیرهاست: هر کس وضعیت را از
+   DL_DOWNLOADING عوض کند، حسابداری را خودش انجام داده است؛ این
+   thread فقط وقتی دست می‌برد که هنوز صاحب وضعیت است.
+   ══════════════════════════════════════════════════════ */
+typedef struct {
+    IDM_Engine   *eng;
+    IDM_Download *dl;
+} HlsEngineCtx;
+
+static int hls_engine_should_stop(void *p) {
+    HlsEngineCtx *h = (HlsEngineCtx *)p;
+    BOOL stop;
+    EnterCriticalSection(&h->eng->lock);
+    stop = h->eng->shutdown || h->dl->state != DL_DOWNLOADING || h->dl->remove_pending;
+    LeaveCriticalSection(&h->eng->lock);
+    return stop ? 1 : 0;
+}
+
+static void hls_engine_progress(uint64_t bytes_done, uint32_t done, uint32_t total, void *p) {
+    HlsEngineCtx *h = (HlsEngineCtx *)p;
+    EnterCriticalSection(&h->eng->lock);
+    InterlockedExchange64((volatile LONGLONG *)&h->dl->downloaded, (LONGLONG)bytes_done);
+    if (done > 0 && total > 0)
+        h->dl->total_size = bytes_done * (uint64_t)total / (uint64_t)done;
+    LeaveCriticalSection(&h->eng->lock);
+}
+
+static DWORD engine_hls_launch(IDM_Engine *eng, IDM_Download *dl) {
+    EnterCriticalSection(&eng->lock);
+    if (dl->state != DL_LAUNCHING) {
+        /* pause/cancel/remove پیش از شروع: حسابداری همان کنش کاربر بوده */
+        LeaveCriticalSection(&eng->lock);
+        return 0;
+    }
+    dl->hls_mode = true;
+    dl->state    = DL_DOWNLOADING;
+    if (eng->notify_hwnd)
+        PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
+                     (WPARAM)dl->id, (LPARAM)DL_DOWNLOADING);
+    LeaveCriticalSection(&eng->lock);
+
+    HlsEngineCtx hc;
+    hc.eng = eng;
+    hc.dl  = dl;
+    HlsRun run;
+    memset(&run, 0, sizeof(run));
+    run.dl           = dl;
+    run.url          = dl->url;
+    run.referer      = dl->referer;
+    run.temp_path    = dl->temp_path;
+    run.out_path     = dl->out_path;
+    run.should_stop  = hls_engine_should_stop;
+    run.stop_ctx     = &hc;
+    run.on_progress  = hls_engine_progress;
+    run.progress_ctx = &hc;
+
+    HlsStatus st = hls_download_run(&run);
+
+    EnterCriticalSection(&eng->lock);
+    if (st == HLS_OK && dl->state == DL_DOWNLOADING) {
+        snprintf(dl->out_path, sizeof(dl->out_path), "%s", run.final_path);
+        dl->total_size = (uint64_t)dl->downloaded;
+        dl->state = DL_COMPLETED;
+        eng->active_count--;
+        if (eng->notify_hwnd)
+            PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
+                         (WPARAM)dl->id, (LPARAM)DL_COMPLETED);
+    } else if (st != HLS_OK && st != HLS_ERR_STOPPED && dl->state == DL_DOWNLOADING) {
+        snprintf(dl->fail_reason, sizeof(dl->fail_reason), "%s", run.error);
+        dl->state = DL_FAILED;
+        eng->active_count--;
+        if (eng->notify_hwnd)
+            PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
+                         (WPARAM)dl->id, (LPARAM)DL_FAILED);
+    } else if (st == HLS_ERR_STOPPED && dl->state == DL_DOWNLOADING && !dl->remove_pending) {
+        /* خاموش شدن برنامه: دانلود به Paused برمی‌گردد تا بعد از شروع ادامه یابد */
+        dl->state = DL_PAUSED;
+        eng->active_count--;
+        if (eng->notify_hwnd)
+            PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
+                         (WPARAM)dl->id, (LPARAM)DL_PAUSED);
+    }
+    BOOL cancelled = (dl->state == DL_CANCELLED);
+    LeaveCriticalSection(&eng->lock);
+
+    if (cancelled) {
+        /* لغو یعنی دور ریختن؛ pause کانتینر را نگه می‌دارد */
+        DeleteFileA(dl->temp_path);
+    }
+    return 0;
+}
+
 static DWORD WINAPI launch_thread_impl(LPVOID param) {
     LaunchCtx    *ctx = (LaunchCtx *)param;
     IDM_Engine   *eng = ctx->eng;
     IDM_Download *dl  = ctx->dl;
     free(ctx);
+
+    /* HLS / M3U8: کل جریان با resume در سطح segment (کانتینر .tels) */
+    if (hls_download_wants(dl->url))
+        return engine_hls_launch(eng, dl);
 
     /* ── ① discover (شبکه، بدون lock) ── */
     bool is_resume = false;
@@ -788,6 +891,9 @@ static DWORD WINAPI scheduler_thread_impl(LPVOID param) {
                 if (eng->notify_hwnd)
                     PostMessageA(eng->notify_hwnd, IDM_WM_PROGRESS,
                                  (WPARAM)dl->id, 0);
+
+                /* HLS: خودش تکمیل و خطایابی می‌کند؛ مانیتور نباید آن را کامل کند */
+                if (dl->hls_mode) break;
 
                 if (any_failed(dl))
                     auto_retry_failed_segs(dl, 10);

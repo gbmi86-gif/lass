@@ -464,10 +464,11 @@ cleanup:
 /* ======================================================
    Open a ranged HTTP connection for a segment
    ====================================================== */
-HTTP_Conn *http_open_range_ex(const char *url, const char *referer,
+HTTP_Conn *http_open_range_status(const char *url, const char *referer,
                                struct IDM_Download *dl,
                                uint64_t start, uint64_t end,
-                               uint32_t *retry_after_out) {
+                               uint32_t *retry_after_out, int *status_out) {
+    if (status_out) *status_out = 0;
     if (!url) return NULL;
 
     HINTERNET inet = get_inet_handle();
@@ -566,6 +567,7 @@ HTTP_Conn *http_open_range_ex(const char *url, const char *referer,
                    &status, &sz, NULL);
     /* 206 = partial content (range واقعاً honor شده)
        200 = سرور Range رو نادیده گرفته و کل فایل رو از صفر می‌فرسته */
+    if (status_out) *status_out = (int)status;
     if (status != 206 && status != 200) {
         /* گفتگو، نه دیکته: اگه سرور روی 429/503 صراحتاً Retry-After فرستاده، برای segment برمی‌گردونیم */
         if (retry_after_out && (status == 429 || status == 503)) {
@@ -589,6 +591,13 @@ HTTP_Conn *http_open_range_ex(const char *url, const char *referer,
     conn->bytes_read  = 0;
     conn->open        = true;
     return conn;
+}
+
+HTTP_Conn *http_open_range_ex(const char *url, const char *referer,
+                               struct IDM_Download *dl,
+                               uint64_t start, uint64_t end,
+                               uint32_t *retry_after_out) {
+    return http_open_range_status(url, referer, dl, start, end, retry_after_out, NULL);
 }
 
 /* حفظ سازگاری: همان رفتار قبلی، بدون گرفتن Retry-After */

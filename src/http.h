@@ -126,6 +126,12 @@ IDM_Result http_discover(const char *url, const char *referer,
 void http_extract_host(const char *url, char *out, int out_sz);
 
 /* ---- Segment download ---- */
+/* همان http_open_range_ex، به‌علاوه‌ی کد HTTP پاسخ در *status_out (۰ یعنی خطای شبکه).
+   HLS برای جدا کردن 404 (دائمی) از خطای موقت به این نیاز دارد. */
+HTTP_Conn *http_open_range_status(const char *url, const char *referer,
+                                  struct IDM_Download *dl,
+                                  uint64_t start, uint64_t end,
+                                  uint32_t *retry_after_out, int *status_out);
 HTTP_Conn *http_open_range(const char *url, const char *referer,
                            struct IDM_Download *dl,
                            uint64_t start, uint64_t end);

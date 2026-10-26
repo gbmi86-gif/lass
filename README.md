@@ -30,7 +30,162 @@ A fast, plugin-based download manager for Windows — built from scratch with Wi
 - **Integer overflow checks:** Safe memory handling.
 - **Test isolation:** `lass_paths` ensures the real profile remains untouched.
 
----
+## Why Lass?
+
+- **Open by design:** Every line is GPL-3.0. You can read it, change it, 
+  learn from it, or build your own project on top of it.
+- **Modular:** The download engine, key-value store, container format, 
+  and browser pipe are separate modules. Replace one without touching the rest.
+- **Transparent:** No hidden telemetry, no closed binaries. If there's a bug, 
+  it's in the open — and you can fix it.
+- **Plugin-friendly:** Native messaging for Chrome, Firefox, and Edge.
+- **Lightweight:** No Java runtime, no Electron. Just C and Win32.
+- **It negotiates, it doesn't dictate.** Most download managers 
+  ignore the server. Lass reads Retry-After, parks segments that 
+  make no progress, reduces concurrency on troubled hosts, and 
+  sends If-Range for smart resume. It respects the server — and 
+  the server respects it back.
+
+## Design philosophy: negotiate, don't dictate
+
+Most download managers treat the server as a dumb pipe: they open 
+as many connections as possible, retry aggressively, and ignore 
+what the server is telling them. This works — until the server 
+rate-limits you, parks your IP, or starts returning `429`.
+
+Lass takes a different approach. It **listens** to the server 
+and adapts.
+
+### What "negotiation" means in practice
+
+- **Reads `Retry-After`** on `429`/`503` and waits the requested 
+  time (capped at 5 minutes) instead of hammering the server.
+- **Parks stalled segments** after 10 consecutive attempts 
+  without progress, and records *why* each segment failed.
+- **Reduces concurrency on troubled hosts** (`engine_report_host_trouble`): 
+  a host that keeps failing gets fewer segments next time, 
+  automatically.
+- **Sends `If-Range` with the stored `ETag`** so resume works 
+  correctly even if the file changed on the server.
+- **Distinguishes permanent from transient errors**: `404`/`410`/`400`/`401` 
+  stop immediately; `429`/`500`/`503` are retried with backoff.
+
+The result is a download that's **slower to start but faster to 
+finish** — and a server that stays healthy for the next user.
+
+### Why we changed
+
+Early builds (v4) were speed-first: aggressive segmentation, 
+constant retries, maximum throughput. They were fast — sometimes 
+faster than IDM — but they hammered servers and got rate-limited. 
+On a rate-limited server, v4 could hit ~1 MB/s while opening 8+ 
+connections; the server throttled each one to ~125 KB/s.
+
+Starting with v5.0.49, Lass switched to a **negotiation-first** 
+model. On the same rate-limited server, v5 reaches ~25 MB/s by 
+noticing which connections are throttled, parking them, and 
+keeping the fast one alive. Same server, same file — **25× faster**, 
+because it listens instead of dictating.
+
+### Responsible use
+
+Lass is designed to negotiate, not to abuse. Please:
+
+- Respect server rate limits and terms of service.
+- Don't use Lass to hammer servers that are clearly throttling you.
+- Use the built-in speed limiter if you need a hard cap.
+
+The goal is a download manager that's **fast because it's smart**, 
+not fast because it's rude.
+## FAQ
+
+### Is Lass a replacement for IDM?
+
+No. IDM is a mature, closed-source product with years of 
+development and millions of users. Lass is a smaller, 
+open-source project with a different philosophy. If you want a 
+polished, set-and-forget download manager, IDM or FDM is a 
+better fit. If you want a download manager you can read, 
+modify, and extend, Lass is for you.
+
+### Why is v5 slower than v4?
+
+v4 was speed-first: aggressive segmentation, constant retries, 
+maximum throughput. It was fast — sometimes faster than IDM — but 
+it hammered servers and got rate-limited. On a rate-limited 
+server, v4 could hit ~1 MB/s while opening 8+ connections; the 
+server throttled each one to ~125 KB/s.
+
+v5 switched to a **negotiation-first** model (starting with 
+v5.0.49). It reads `Retry-After`, parks stalled segments, and 
+reduces concurrency on troubled hosts. The result is a download 
+that's slower to *start* but faster to *finish* — and a server 
+that stays healthy for the next user. On the same rate-limited 
+server, v5 reaches ~25 MB/s because it listens instead of 
+dictating.
+
+### Does Lass hammer servers?
+
+No — and that's the point. Lass is designed to negotiate, not 
+to abuse. It reads `Retry-After`, parks segments that make no 
+progress, and reduces concurrency on hosts that keep failing. 
+If you need a hard cap, use the built-in speed limiter.
+
+### Why Windows-only?
+
+Lass is built on Win32 APIs (`MoveFileEx`, `CRITICAL_SECTION`, 
+DPAPI, native messaging pipes). Porting it to Linux or macOS 
+would mean rewriting the storage layer, the encryption layer, 
+and the browser integration. That's a significant effort, and 
+it's not on the roadmap right now. If you want a cross-platform 
+open-source download manager, look at aria2 or JDownloader.
+
+### Why GPL-3.0?
+
+Because transparency matters. GPL-3.0 ensures that anyone who 
+distributes a modified version of Lass must also share their 
+source. This keeps the project open — not just in name, but in 
+practice. If you use Lass in your own project, you must also 
+release your source under GPL-3.0.
+
+### Can I use Lass commercially?
+
+GPL-3.0 allows commercial use, but any distributed modification 
+must also be GPL-3.0. If you need a different license (e.g., for 
+a closed-source product), contact the maintainer.
+
+### Does Lass support BitTorrent?
+
+Not yet. BitTorrent is on the wishlist, but it's a significant 
+undertaking (DHT, peer protocol, piece verification). The current 
+focus is on HTTP/HTTPS/FTP and streaming protocols (HLS, DASH, 
+RTMP).
+
+### Does Lass collect telemetry?
+
+No. Lass has no telemetry, no analytics, no phone-home. Every 
+line of code is in this repository. If you don't believe me, 
+read it.
+
+### How do I report a bug?
+
+Open an issue on GitHub with:
+- The version of Lass (shown in the title bar and About dialog).
+- Steps to reproduce.
+- The relevant lines from `lass.log` (if any).
+- Your Windows version and toolchain (if building from source).
+
+Please don't paste passwords or full URLs with credentials. 
+Lass redacts passwords in logs, but double-check before posting.
+
+### Can I contribute?
+
+Yes! Pull requests are welcome. Please:
+- Keep changes focused (one feature or fix per PR).
+- Add tests for new behavior.
+- Run the test suite (`test_all.exe`) and make sure it passes.
+- Follow the existing code style (C11, Win32, no external 
+  dependencies).
 
 ## 🏗️ Architecture
 

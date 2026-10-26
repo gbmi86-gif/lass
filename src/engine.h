@@ -70,6 +70,9 @@ struct IDM_Download {
     /* Config snapshot */
     uint32_t         max_segments;
     bool             accept_ranges;
+    /* true وقتی این دانلود با مسیر HLS (کل جریان در launch thread) اجرا می‌شود.
+       مانیتور چنین دانلودی را خودش تکمیل نمی‌کند. */
+    bool             hls_mode;
     /* تملک برای کار بیرون از lock (pause/cancel/launch/مانیتور): busy>0 یعنی یک thread
        همین الان به segment ها یا thread launch وابسته است؛ remove_pending یعنی حذف
        خواسته شده ولی تخریب به آخرین صاحب busy سپرده شده. */
