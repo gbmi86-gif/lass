@@ -66,6 +66,14 @@ static char *hls_http_get_text(const char *url, int *out_len) {
     return buf;
 }
 
+/* کپی امن رشته به بافر با اندازه‌ی ثابت (همیشه NUL-terminated، بدون snprintf روی آرایه‌ها) */
+static void hls_copy(char *dst, size_t dst_sz, const char *src) {
+    size_t n = strlen(src);
+    if (n >= dst_sz) n = dst_sz - 1u;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
 /* ======================================================
    حل آدرس نسبی به مطلق
    ====================================================== */
@@ -204,7 +212,7 @@ static IDM_Result hls_handle_key(const char *url, const char *attrs,
     memset(&k, 0, sizeof(k));
     char abs_uri[HLS_MAX_URL];
     hls_resolve_url(url, uri, abs_uri, sizeof(abs_uri));
-    snprintf(k.uri, sizeof(k.uri), "%s", abs_uri);
+    hls_copy(k.uri, sizeof(k.uri), abs_uri);
     if (iv_s[0]) {
         if (!hls_parse_iv(iv_s, k.iv)) return IDM_ERR_INVALID;
         k.has_iv = TRUE;
@@ -253,8 +261,7 @@ static IDM_Result hls_handle_map(const char *url, const char *attrs,
         *cur_map = -1;
         return IDM_OK;
     }
-    snprintf(out->maps[out->map_count].uri, sizeof(out->maps[out->map_count].uri),
-             "%s", abs_uri);
+    hls_copy(out->maps[out->map_count].uri, sizeof(out->maps[out->map_count].uri), abs_uri);
     *cur_map = out->map_count++;
     return IDM_OK;
 }
@@ -266,7 +273,7 @@ IDM_Result hls_parse_text(const char *url, const char *text, int len, HLS_Playli
     if (!url || !text || !out || len < 7) return IDM_ERR_INVALID;
     if (strncmp(text, "#EXTM3U", 7) != 0) return IDM_ERR_INVALID;
 
-    snprintf(out->base_url, sizeof(out->base_url), "%s", url);
+    hls_copy(out->base_url, sizeof(out->base_url), url);
     char *slash = strrchr(out->base_url, '/');
     if (slash) *(slash + 1) = '\0';
 
@@ -357,7 +364,7 @@ IDM_Result hls_parse_text(const char *url, const char *text, int len, HLS_Playli
                          "too many quality variants");
                 return IDM_OK;
             }
-            snprintf(pv.url, sizeof(pv.url), "%s", abs_uri);
+            hls_copy(pv.url, sizeof(pv.url), abs_uri);
             out->variants[out->variant_count++] = pv;
             pend_variant = FALSE;
             continue;
@@ -370,7 +377,7 @@ IDM_Result hls_parse_text(const char *url, const char *text, int len, HLS_Playli
         }
         HLS_Segment *s = &out->segments[out->segment_count];
         memset(s, 0, sizeof(*s));
-        snprintf(s->url, sizeof(s->url), "%s", abs_uri);
+        hls_copy(s->url, sizeof(s->url), abs_uri);
         s->duration  = have_dur ? pend_dur : 0.0;
         s->index     = out->segment_count;
         s->key_index = cur_key;
@@ -382,7 +389,7 @@ IDM_Result hls_parse_text(const char *url, const char *text, int len, HLS_Playli
             s->has_range = TRUE;
             s->range_off = off;
             s->range_len = pend_range_len;
-            snprintf(last_range_uri, sizeof(last_range_uri), "%s", s->url);
+            hls_copy(last_range_uri, sizeof(last_range_uri), s->url);
             last_range_end = off + pend_range_len;
         }
         out->total_duration += s->duration;

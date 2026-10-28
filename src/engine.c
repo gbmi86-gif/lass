@@ -252,6 +252,15 @@ static void hls_engine_progress(uint64_t bytes_done, uint32_t done, uint32_t tot
     LeaveCriticalSection(&h->eng->lock);
 }
 
+/* کپی امن رشته به بافر با اندازه‌ی ثابت: همیشه NUL-terminated.
+   snprintf("%s", آرایه‌ی بزرگ‌تر) در کامپایلرهای جدید -Wformat-truncation را فعال می‌کند. */
+static void hls_copy_str(char *dst, size_t dst_sz, const char *src) {
+    size_t n = strlen(src);
+    if (n >= dst_sz) n = dst_sz - 1u;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
 static DWORD engine_hls_launch(IDM_Engine *eng, IDM_Download *dl) {
     EnterCriticalSection(&eng->lock);
     if (dl->state != DL_LAUNCHING) {
@@ -285,7 +294,7 @@ static DWORD engine_hls_launch(IDM_Engine *eng, IDM_Download *dl) {
 
     EnterCriticalSection(&eng->lock);
     if (st == HLS_OK && dl->state == DL_DOWNLOADING) {
-        snprintf(dl->out_path, sizeof(dl->out_path), "%s", run.final_path);
+        hls_copy_str(dl->out_path, sizeof(dl->out_path), run.final_path);
         dl->total_size = (uint64_t)dl->downloaded;
         dl->state = DL_COMPLETED;
         eng->active_count--;
@@ -293,7 +302,7 @@ static DWORD engine_hls_launch(IDM_Engine *eng, IDM_Download *dl) {
             PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
                          (WPARAM)dl->id, (LPARAM)DL_COMPLETED);
     } else if (st != HLS_OK && st != HLS_ERR_STOPPED && dl->state == DL_DOWNLOADING) {
-        snprintf(dl->fail_reason, sizeof(dl->fail_reason), "%s", run.error);
+        hls_copy_str(dl->fail_reason, sizeof(dl->fail_reason), run.error);
         dl->state = DL_FAILED;
         eng->active_count--;
         if (eng->notify_hwnd)

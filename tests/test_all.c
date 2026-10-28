@@ -5079,6 +5079,35 @@ static void test_hls_engine(void) {
     if (fin) DeleteFileA(fin->out_path);
 }
 
+static void test_hls_engine_failure(void) {
+    SECTION("HLS through the engine: a refused stream ends as failed, with its reason kept");
+    static const char LIVE[] = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nlv0.ts\n";
+    hls_test_server_set("/engf/index.m3u8", (const uint8_t *)LIVE, (uint32_t)(sizeof(LIVE) - 1));
+    IDM_Engine *eng = engine_create(NULL);
+    TEST("engine created for the failing HLS case", eng != NULL);
+    if (!eng) return;
+    IDM_Download *dl = engine_add(eng, HLS_T_BASE "/engf/index.m3u8",
+                                  "tels_test_hls_engf.m3u8", 1u, 0u);
+    TEST("refused HLS link queued in the engine", dl != NULL);
+    uint32_t id = dl ? dl->id : 0u;
+    DL_State state = DL_IDLE;
+    DWORD t0 = GetTickCount();
+    while (dl && GetTickCount() - t0 < 20000u) {
+        IDM_Download *cur = engine_find(eng, id);
+        state = cur ? cur->state : DL_FAILED;
+        if (state == DL_COMPLETED || state == DL_FAILED) break;
+        Sleep(50);
+    }
+    IDM_Download *fin = engine_find(eng, id);
+    TEST("engine marks a live stream as failed", state == DL_FAILED);
+    TEST("failure keeps the reason intact (not empty, not cut off)",
+         fin != NULL && strstr(fin->fail_reason, "live") != NULL &&
+         strlen(fin->fail_reason) > 20);
+    TEST("refused stream leaves no temporary file",
+         fin != NULL && GetFileAttributesA(fin->temp_path) == INVALID_FILE_ATTRIBUTES);
+    engine_destroy(eng);
+}
+
 static void test_hls_all(void) {
     if (!hls_test_server_start(18480)) {
         TEST("HLS test server listens on loopback", FALSE);
@@ -5093,6 +5122,7 @@ static void test_hls_all(void) {
     test_hls_stop_resume();
     test_hls_rejects();
     test_hls_engine();
+    test_hls_engine_failure();
     hls_test_server_stop();
 }
 
