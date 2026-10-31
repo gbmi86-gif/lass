@@ -15,6 +15,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "security_fixes.h"
 #include <wininet.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,7 +53,7 @@ static const char *VIDEO_MIMES[] = {
 static BOOL vs_is_video_mime(const char *content_type) {
     if (!content_type || !content_type[0]) return FALSE;
     char clean[128] = {0};
-    strncpy(clean, content_type, sizeof(clean)-1);
+    safe_strncpy(clean, content_type, sizeof(clean));
     char *semi = strchr(clean, ';');
     if (semi) *semi = '\0';
     for (int i = 0; VIDEO_MIMES[i]; i++)
@@ -419,7 +420,7 @@ static BOOL sniff_aparat(const char *url, VS_VideoInfo *out) {
 
         if (video_url[0] && strstr(video_url, "http")) {
             VS_Quality *q = &out->qualities[cnt];
-            strncpy(q->url, video_url, VS_MAX_URL-1);
+            safe_strncpy(q->url, video_url, VS_MAX_URL);
             snprintf(q->label, VS_MAX_LABEL, "Quality %d", cnt+1);
             strcpy(q->ext, ".mp4");
             cnt++;
@@ -458,7 +459,7 @@ static BOOL sniff_youtube(const char *url, VS_VideoInfo *out) {
                         full[slen] = '\\';
                         memcpy(full+slen+1, "yt-dlp.exe", 10);
                         if (GetFileAttributesA(full) != INVALID_FILE_ATTRIBUTES) {
-                            strncpy(ytdlp, full, MAX_PATH-1);
+                            safe_strncpy(ytdlp, full, MAX_PATH);
                             break;
                         }
                     }
@@ -550,7 +551,7 @@ static BOOL sniff_youtube(const char *url, VS_VideoInfo *out) {
 
             if (vu[0] && strstr(vu,"http") && !strstr(vu,"manifest")) {
                 VS_Quality *qq = &out->qualities[cnt];
-                strncpy(qq->url, vu, VS_MAX_URL-1);
+                safe_strncpy(qq->url, vu, VS_MAX_URL);
                 /* height رو هم بگیر */
                 const char *hp = strstr(s, "\"height\":");
                 if (hp && hp < fmt + 500) {
@@ -610,7 +611,7 @@ static BOOL sniff_instagram(const char *url, VS_VideoInfo *out) {
         vu[ui]='\0';
         if (vu[0] && strstr(vu,"http")) {
             VS_Quality *q = &out->qualities[cnt];
-            strncpy(q->url, vu, VS_MAX_URL-1);
+            safe_strncpy(q->url, vu, VS_MAX_URL);
             snprintf(q->label, VS_MAX_LABEL, "Video %d", cnt+1);
             strcpy(q->ext, ".mp4");
             cnt++;
@@ -668,7 +669,7 @@ BOOL vs_sniff_sync(const char *url, const char *referer,
                     vu[ui]='\0';
                     if (vu[0]) {
                         VS_Quality *q=&out->qualities[cnt];
-                        strncpy(q->url,vu,VS_MAX_URL-1);
+                        safe_strncpy(q->url, vu, VS_MAX_URL);
                         const char *qp=strstr(s,"\"quality\":");
                         if(qp&&qp<pu+200){
                             char ql[32]={0};
@@ -706,7 +707,7 @@ static DWORD WINAPI vs_async_worker(LPVOID param) {
 
     VS_VideoInfo *info = (VS_VideoInfo *)calloc(1, sizeof(*info));
     if (info) {
-        strncpy(info->title, ctx->title, sizeof(info->title)-1);
+        safe_strncpy(info->title, ctx->title, sizeof(info->title));
         if (vs_sniff_sync(ctx->url, ctx->referer, info)) {
             if (p->on_found) p->on_found(info, p->userdata);
         }

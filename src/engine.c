@@ -252,15 +252,6 @@ static void hls_engine_progress(uint64_t bytes_done, uint32_t done, uint32_t tot
     LeaveCriticalSection(&h->eng->lock);
 }
 
-/* کپی امن رشته به بافر با اندازه‌ی ثابت: همیشه NUL-terminated.
-   snprintf("%s", آرایه‌ی بزرگ‌تر) در کامپایلرهای جدید -Wformat-truncation را فعال می‌کند. */
-static void hls_copy_str(char *dst, size_t dst_sz, const char *src) {
-    size_t n = strlen(src);
-    if (n >= dst_sz) n = dst_sz - 1u;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
-
 static DWORD engine_hls_launch(IDM_Engine *eng, IDM_Download *dl) {
     EnterCriticalSection(&eng->lock);
     if (dl->state != DL_LAUNCHING) {
@@ -294,7 +285,7 @@ static DWORD engine_hls_launch(IDM_Engine *eng, IDM_Download *dl) {
 
     EnterCriticalSection(&eng->lock);
     if (st == HLS_OK && dl->state == DL_DOWNLOADING) {
-        hls_copy_str(dl->out_path, sizeof(dl->out_path), run.final_path);
+        safe_strncpy(dl->out_path, run.final_path, sizeof(dl->out_path));
         dl->total_size = (uint64_t)dl->downloaded;
         dl->state = DL_COMPLETED;
         eng->active_count--;
@@ -302,7 +293,7 @@ static DWORD engine_hls_launch(IDM_Engine *eng, IDM_Download *dl) {
             PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
                          (WPARAM)dl->id, (LPARAM)DL_COMPLETED);
     } else if (st != HLS_OK && st != HLS_ERR_STOPPED && dl->state == DL_DOWNLOADING) {
-        hls_copy_str(dl->fail_reason, sizeof(dl->fail_reason), run.error);
+        safe_strncpy(dl->fail_reason, run.error, sizeof(dl->fail_reason));
         dl->state = DL_FAILED;
         eng->active_count--;
         if (eng->notify_hwnd)
@@ -376,8 +367,7 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
             LOGE(LOG_MOD_ENGINE,
                  "dl#%u launch FAILED permanently (dead link — HTTP 404/410/400/401, "
                  "not retrying)", dl->id);
-            strncpy(dl->fail_reason, "Link not found or invalid (404)",
-                    sizeof(dl->fail_reason) - 1);
+            safe_strncpy(dl->fail_reason, "Link not found or invalid (404)", sizeof(dl->fail_reason));
             dl->state = DL_FAILED;
             eng->active_count--;
             if (eng->notify_hwnd)
@@ -435,8 +425,7 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
             LOGE(LOG_MOD_ENGINE,
                  "dl#%u launch FAILED permanently after %u attempts",
                  dl->id, dl->launch_retry_count);
-            strncpy(dl->fail_reason, "Connection failed after multiple retries",
-                    sizeof(dl->fail_reason) - 1);
+            safe_strncpy(dl->fail_reason, "Connection failed after multiple retries", sizeof(dl->fail_reason));
             dl->state = DL_FAILED;
             eng->active_count--;
             if (eng->notify_hwnd)
@@ -484,7 +473,7 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
 
             /* پوشه رو از out_path قبلی استخراج کن */
             char dir[IDM_MAX_PATH] = {0};
-            strncpy(dir, dl->out_path, IDM_MAX_PATH - 1);
+            safe_strncpy(dir, dl->out_path, sizeof(dir));
             char *last_sep = NULL;
             for (char *p = dir; *p; p++)
                 if (*p == '\\' || *p == '/') last_sep = p;
@@ -497,7 +486,7 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
                     memcpy(new_path, dir, dir_len);
                     memcpy(new_path + dir_len, dl->filename, fn_len);
                     new_path[dir_len + fn_len] = '\0';
-                    strncpy(dl->out_path, new_path, IDM_MAX_PATH - 1);
+                    safe_strncpy(dl->out_path, new_path, sizeof(dl->out_path));
                     int avail = IDM_MAX_PATH - 6;
                     snprintf(dl->temp_path, IDM_MAX_PATH, "%.*s.tels",
                              avail, dl->out_path);
@@ -702,7 +691,7 @@ static void host_stagger_record(IDM_Engine *eng, const char *host) {
     DWORD oldest_time = eng->host_stagger_at[0];
     for (int i = 0; i < ENGINE_HOST_STAGGER_SLOTS; i++) {
         if (!eng->host_stagger_name[i][0]) {
-            strncpy(eng->host_stagger_name[i], host, 127);
+            safe_strncpy(eng->host_stagger_name[i], host, sizeof(eng->host_stagger_name[i]));
             eng->host_stagger_at[i] = now;
             return;
         }
@@ -711,7 +700,7 @@ static void host_stagger_record(IDM_Engine *eng, const char *host) {
             oldest_idx  = i;
         }
     }
-    strncpy(eng->host_stagger_name[oldest_idx], host, 127);
+    safe_strncpy(eng->host_stagger_name[oldest_idx], host, sizeof(eng->host_stagger_name[oldest_idx]));
     eng->host_stagger_at[oldest_idx] = now;
 }
 
@@ -1759,7 +1748,7 @@ int engine_add_batch(IDM_Engine *eng,
             const char *fn = strrchr(line, '/');
             const char *fname = (fn && *(fn+1)) ? fn+1 : "download";
             char fname_clean[256] = {0};
-            strncpy(fname_clean, fname, sizeof(fname_clean)-1);
+            safe_strncpy(fname_clean, fname, sizeof(fname_clean));
             char *q = strchr(fname_clean, '?');
             if (q) *q = '\0';
             if (!fname_clean[0]) snprintf(fname_clean, sizeof(fname_clean), "download_%d", count);

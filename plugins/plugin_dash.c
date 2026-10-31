@@ -19,6 +19,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "security_fixes.h"
 #include <wininet.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -137,7 +138,7 @@ static void dash_expand_template(const char *tmpl, const char *rep_id,
                                    char *out, int out_sz) {
     if (!tmpl || !out) return;
     char tmp[DASH_MAX_URL] = {0};
-    strncpy(tmp, tmpl, sizeof(tmp) - 1);
+    safe_strncpy(tmp, tmpl, sizeof(tmp));
 
     /* $RepresentationID$ */
     {
@@ -182,7 +183,7 @@ static void dash_expand_template(const char *tmpl, const char *rep_id,
             snprintf(p, sizeof(tmp) - (p - tmp), "%s%s", ts, rest);
         }
     }
-    strncpy(out, tmp, out_sz - 1);
+    safe_strncpy(out, tmp, (size_t)out_sz);
     out[out_sz - 1] = '\0';
 }
 
@@ -238,8 +239,8 @@ static int parse_adaptation_set(const char *xml_section,
         const char *st = strstr(rep, "<SegmentTemplate");
         if (!st || st > rep_end) {
             /* استفاده از parent template */
-            strncpy(r->media_template, parent_template, DASH_MAX_URL - 1);
-            strncpy(r->init_url,       parent_init,     DASH_MAX_URL - 1);
+            safe_strncpy(r->media_template, parent_template, DASH_MAX_URL);
+            safe_strncpy(r->init_url, parent_init, DASH_MAX_URL);
             r->timescale    = parent_timescale;
             r->duration     = parent_duration;
             r->start_number = parent_start;
@@ -255,7 +256,7 @@ static int parse_adaptation_set(const char *xml_section,
         if (r->init_url[0] && r->init_url[0] != 'h') {
             char tmp[DASH_MAX_URL];
             dash_resolve_url(base_url, r->init_url, tmp, sizeof(tmp));
-            strncpy(r->init_url, tmp, DASH_MAX_URL - 1);
+            safe_strncpy(r->init_url, tmp, DASH_MAX_URL);
         }
         if (r->media_template[0]) {
             r->use_template = TRUE;
@@ -276,8 +277,7 @@ static int parse_adaptation_set(const char *xml_section,
                 if (media_url[0]) {
                     char resolved[DASH_MAX_URL];
                     dash_resolve_url(base_url, media_url, resolved, sizeof(resolved));
-                    strncpy(r->segments[r->segment_list_count],
-                            resolved, DASH_MAX_URL - 1);
+                    safe_strncpy(r->segments[r->segment_list_count], resolved, DASH_MAX_URL);
                     r->segment_list_count++;
                 }
                 seg = su + 11;
@@ -555,7 +555,7 @@ IDM_Result dash_download(const char    *mpd_url,
                 if (seg_url[0] != 'h')
                     dash_resolve_url(mf->base_url, seg_url, resolved, sizeof(resolved));
                 else
-                    strncpy(resolved, seg_url, DASH_MAX_URL - 1);
+                    safe_strncpy(resolved, seg_url, DASH_MAX_URL);
 
                 if (!dash_download_segment(resolved, hOut, 2)) {
                     LOGW(LOG_MOD_DASH, "Failed segment #%lld", i);

@@ -10,6 +10,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "../plugins/security_fixes.h"
 #include <shlobj.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,11 +75,11 @@ BOOL queue_persist_save(IDM_Engine *eng) {
         r->has_schedule = dl->has_schedule;
         r->sched_low    = dl->scheduled_at.dwLowDateTime;
         r->sched_high   = dl->scheduled_at.dwHighDateTime;
-        strncpy(r->url,        dl->url,        IDM_MAX_URL      - 1);
-        strncpy(r->out_path,   dl->out_path,   IDM_MAX_PATH     - 1);
-        strncpy(r->filename,   dl->filename,   IDM_MAX_FILENAME - 1);
-        strncpy(r->group_name, dl->group_name, 63);
-        strncpy(records[i].pass_enc, dl->pass_enc, sizeof(records[i].pass_enc) - 1);
+        safe_strncpy(r->url, dl->url, IDM_MAX_URL);
+        safe_strncpy(r->out_path, dl->out_path, IDM_MAX_PATH);
+        safe_strncpy(r->filename, dl->filename, IDM_MAX_FILENAME);
+        safe_strncpy(r->group_name, dl->group_name, sizeof(r->group_name));
+        safe_strncpy(records[i].pass_enc, dl->pass_enc, sizeof(records[i].pass_enc));
     }
 
     LeaveCriticalSection(&eng->lock);

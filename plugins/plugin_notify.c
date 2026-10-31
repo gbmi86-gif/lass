@@ -12,6 +12,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "security_fixes.h"
 #include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -130,8 +131,8 @@ static void show_toast(Notify_Priv *p, NotifyEvent evt,
     default:                p->toast_color = TOAST_CLR_BG_INFO; break;
     }
 
-    strncpy(p->toast_title, title ? title : "", sizeof(p->toast_title)-1);
-    strncpy(p->toast_body,  body  ? body  : "", sizeof(p->toast_body)-1);
+    safe_strncpy(p->toast_title, title ? title : "", sizeof(p->toast_title));
+    safe_strncpy(p->toast_body, body ? body : "", sizeof(p->toast_body));
 
     /* موقعیت: گوشه پایین‌راست */
     int sw = GetSystemMetrics(SM_CXSCREEN);
@@ -205,10 +206,8 @@ static void show_balloon(Notify_Priv *p, NotifyEvent evt,
         break;
     }
 
-    strncpy(nid.szInfoTitle, title ? title : "Lass",
-            sizeof(nid.szInfoTitle) - 1);
-    strncpy(nid.szInfo, body ? body : "",
-            sizeof(nid.szInfo) - 1);
+    safe_strncpy(nid.szInfoTitle, title ? title : "Lass", sizeof(nid.szInfoTitle));
+    safe_strncpy(nid.szInfo, body ? body : "", sizeof(nid.szInfo));
 
     Shell_NotifyIconA(NIM_MODIFY, &nid);
 }

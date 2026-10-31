@@ -10,6 +10,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "../plugins/security_fixes.h"
 #include <shlobj.h>
 #include <shlwapi.h>   /* PathCombineA */
 #include <stdio.h>
@@ -90,7 +91,7 @@ static void reg_get_str(HKEY hk, const char *name,
     DWORD sz = (DWORD)out_sz, type = REG_SZ;
     if (RegQueryValueExA(hk, name, NULL, &type,
                           (BYTE *)out, &sz) != ERROR_SUCCESS) {
-        if (def) strncpy(out, def, out_sz - 1);
+        if (def && def != out) safe_strncpy(out, def, (size_t)out_sz);
     }
     out[out_sz - 1] = '\0';
 }

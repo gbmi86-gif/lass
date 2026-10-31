@@ -13,6 +13,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "../plugins/security_fixes.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -201,7 +202,7 @@ static void core_on_engine_msg(LDM_Core *core, UINT msg,
             IDM_PluginHooks *np = plugins_get_notify();
             if (np) {
                 char fname[256] = {0};
-                if (dl) strncpy(fname, dl->filename, sizeof(fname)-1);
+                if (dl) safe_strncpy(fname, dl->filename, sizeof(fname));
                 notify_on_download_complete(np, fname,
                     (DL_State)lp == DL_COMPLETED);
 
