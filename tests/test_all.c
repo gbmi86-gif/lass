@@ -1043,6 +1043,8 @@ static void test_engine_features(void) {
     TEST("engine create",         eng != NULL);
     if (!eng) return;
 
+    /* بدون دانلود واقعی: این تست فقط صف و گروه را بررسی می‌کند، نه شبکه را */
+    eng->max_concurrent = 0;
     /* ── engine_add_batch ── */
     const char *batch_urls =
         "http://example.com/file1.zip\n"
@@ -2552,6 +2554,102 @@ static void test_engine_destroy_while_launching(void) {
         CloseHandle(th);
     }
     DeleteFileA("stall_test.bin");
+}
+
+/* ======================================================
+   تست: pause، cancel و schedule روی دانلودی که در launch است — حسابداری active_count
+   هر عمل وقتی انجام می‌شود که همان دانلود در حال launch است، پس به زمان‌بندی شبکه وابسته نیست.
+   بعد از برگشتن launch thread ها شمارش باید صفر بماند و scheduler هنوز آزاد باشد.
+   ====================================================== */
+static BOOL launch_wait_state(IDM_Engine *eng, IDM_Download *dl, DL_State want, DWORD ms) {
+    DWORD t0 = GetTickCount();
+    while (dl && GetTickCount() - t0 < ms) {
+        BOOL hit;
+        EnterCriticalSection(&eng->lock);
+        hit = (dl->state == want);
+        LeaveCriticalSection(&eng->lock);
+        if (hit) return TRUE;
+        Sleep(20);
+    }
+    return FALSE;
+}
+
+/* شمارش فعال باید دقیقاً برابر تعداد دانلودهایی باشد که DOWNLOADING یا LAUNCHING هستند */
+static BOOL launch_count_matches(IDM_Engine *eng) {
+    uint32_t n = 0;
+    BOOL ok;
+    EnterCriticalSection(&eng->lock);
+    for (IDM_Download *x = eng->queue_head; x; x = x->next)
+        if (x->state == DL_DOWNLOADING || x->state == DL_LAUNCHING) n++;
+    ok = (eng->active_count == n);
+    LeaveCriticalSection(&eng->lock);
+    return ok;
+}
+
+static void test_engine_action_during_launch(void) {
+    SECTION("Engine: pausing, cancelling or scheduling a launching download keeps the active count right");
+    WSADATA wd;
+    WSAStartup(MAKEWORD(2, 2), &wd);
+    SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port = htons(18483);
+    BOOL listening = (ls != INVALID_SOCKET) &&
+                     bind(ls, (struct sockaddr *)&sa, sizeof(sa)) == 0 &&
+                     listen(ls, 8) == 0;
+    TEST("launch test server listening", listening);
+    if (!listening) {
+        if (ls != INVALID_SOCKET) closesocket(ls);
+        return;
+    }
+    HANDLE th = CreateThread(NULL, 0, stall_server_proc, (LPVOID)(UINT_PTR)ls, 0, NULL);
+
+    IDM_Engine *eng = engine_create(NULL);
+    IDM_Download *a = eng ? engine_add(eng, "http://127.0.0.1:18483/launch_a.bin",
+                                       "tels_test_launch_a.bin", 1, 0) : NULL;
+    IDM_Download *b = eng ? engine_add(eng, "http://127.0.0.1:18483/launch_b.bin",
+                                       "tels_test_launch_b.bin", 1, 0) : NULL;
+    IDM_Download *d = eng ? engine_add(eng, "http://127.0.0.1:18483/launch_d.bin",
+                                       "tels_test_launch_d.bin", 1, 0) : NULL;
+    TEST("three downloads queued", a != NULL && b != NULL && d != NULL);
+
+    /* هر عمل وقتی انجام می‌شود که همان دانلود در حال launch است */
+    BOOL a_ok = eng && a && launch_wait_state(eng, a, DL_LAUNCHING, 15000u);
+    if (a_ok) engine_pause(eng, a->id);
+    BOOL b_ok = eng && b && launch_wait_state(eng, b, DL_LAUNCHING, 15000u);
+    if (b_ok) engine_cancel(eng, b->id);
+    BOOL d_ok = eng && d && launch_wait_state(eng, d, DL_LAUNCHING, 15000u);
+    if (d_ok) engine_schedule(eng, d->id, 23, 59);
+    TEST("each download was seen launching before its action", a_ok && b_ok && d_ok);
+    if (!(a_ok && b_ok && d_ok) && a && b && d)
+        printf("    (states: a=%d b=%d d=%d)\n", (int)a->state, (int)b->state, (int)d->state);
+    TEST("scheduled download is paused by the schedule", d != NULL && d->state == DL_PAUSED);
+    TEST("pause, cancel and schedule leave the count at zero", eng && eng->active_count == 0);
+    TEST("counts match the downloads that are still active", eng && launch_count_matches(eng));
+
+    /* صبر تا هر سه launch thread برگردند: discovery با timeout شبکه تمام می‌شود */
+    DWORD t0 = GetTickCount();
+    while (a && b && d && (a->busy > 0 || b->busy > 0 || d->busy > 0) &&
+           GetTickCount() - t0 < 30000u)
+        Sleep(50);
+    TEST("all launch threads have returned",
+         a && b && d && a->busy == 0 && b->busy == 0 && d->busy == 0);
+    TEST("active count is still zero after the launch threads return",
+         eng && eng->active_count == 0);
+    /* اگر شمارش خراب شده باشد، scheduler دیگر هیچ دانلودی را شروع نمی‌کند */
+    TEST("the scheduler can still launch a download (count below the limit)",
+         eng && eng->active_count < eng->max_concurrent);
+
+    engine_destroy(eng);
+    if (th) {
+        WaitForSingleObject(th, 25000);
+        CloseHandle(th);
+    }
+    DeleteFileA("tels_test_launch_a.bin");
+    DeleteFileA("tels_test_launch_b.bin");
+    DeleteFileA("tels_test_launch_d.bin");
 }
 
 /* ======================================================
@@ -5182,6 +5280,7 @@ int main(void) {
     test_store_compaction();
     test_state_migration();
     test_engine_destroy_while_launching();
+    test_engine_action_during_launch();
     test_segment_policy_parks_stuck_range();
     test_segment_honours_retry_after();
     test_launch_retry_backoff();

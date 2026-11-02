@@ -339,8 +339,11 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
         /* چک کن آیا engine در حال shutdown هست قبل از شروع HTTP */
         if (eng->shutdown) {
             EnterCriticalSection(&eng->lock);
-            dl->state = DL_PAUSED;
-            eng->active_count--;
+            /* فقط اگر هنوز صاحب وضعیت هستیم؛ pause/cancel قبلاً حسابداری کرده‌اند */
+            if (dl->state == DL_LAUNCHING) {
+                dl->state = DL_PAUSED;
+                eng->active_count--;
+            }
             LeaveCriticalSection(&eng->lock);
             return 0;
         }
@@ -354,7 +357,7 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
            این یه تصمیم آگاهانه‌ست — نباید retry کنیم، فوراً احترام
            بذاریم بهش. */
         if (dl->state != DL_LAUNCHING) {
-            eng->active_count--;
+            /* pause یا cancel وسط discovery حسابداری active_count را خودشان انجام داده‌اند */
             LeaveCriticalSection(&eng->lock);
             return 0;
         }
@@ -500,8 +503,7 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
     EnterCriticalSection(&eng->lock);
 
     if (dl->state != DL_LAUNCHING) {
-        /* کاربر در این فاصله cancel کرد */
-        eng->active_count--;
+        /* کاربر در این فاصله cancel کرد؛ حسابداری را cancel انجام داده است */
         LeaveCriticalSection(&eng->lock);
         return 0;
     }
@@ -1536,8 +1538,10 @@ void engine_schedule(IDM_Engine *eng, uint32_t id, int hour, int minute) {
                 for (uint32_t i = 0; i < dl->num_segments; i++)
                     if (dl->segments && dl->segments[i])
                         seg_pause(dl->segments[i]);
-                eng->active_count--;
             }
+            /* DOWNLOADING و LAUNCHING در active_count هستند؛ QUEUED نیست */
+            if (dl->state == DL_DOWNLOADING || dl->state == DL_LAUNCHING)
+                eng->active_count--;
             dl->state = DL_PAUSED;
         }
 
