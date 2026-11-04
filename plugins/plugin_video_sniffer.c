@@ -363,6 +363,7 @@ static BOOL sniff_dash(const char *url, VS_VideoInfo *out) {
     }
     out->best_idx = mf->best_video < cnt ? mf->best_video : 0;
 
+    dash_manifest_free(mf);
     free(mf);
     return TRUE;
 }

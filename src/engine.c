@@ -43,6 +43,7 @@
 #include "../plugins/security_fixes.h"
 #include "transport.h"
 #include "hls_download.h"
+#include "dash_download.h"
 #include "url_secure.h"
 #include "secure_store.h"
 
@@ -259,7 +260,7 @@ static DWORD engine_hls_launch(IDM_Engine *eng, IDM_Download *dl) {
         LeaveCriticalSection(&eng->lock);
         return 0;
     }
-    dl->hls_mode = true;
+    dl->media_mode = true;
     dl->state    = DL_DOWNLOADING;
     if (eng->notify_hwnd)
         PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
@@ -317,6 +318,77 @@ static DWORD engine_hls_launch(IDM_Engine *eng, IDM_Download *dl) {
     return 0;
 }
 
+/* ══════════════════════════════════════════════════════
+   DASH: همان الگوی HLS؛ mux به MP4 در همان launch thread
+   ══════════════════════════════════════════════════════ */
+static DWORD engine_dash_launch(IDM_Engine *eng, IDM_Download *dl) {
+    HlsEngineCtx hc;
+    DashRun run;
+    DashStatus st;
+    BOOL cancelled;
+
+    EnterCriticalSection(&eng->lock);
+    if (dl->state != DL_LAUNCHING) {
+        /* pause/cancel/remove پیش از شروع: حسابداری همان کنش کاربر بوده */
+        LeaveCriticalSection(&eng->lock);
+        return 0;
+    }
+    dl->media_mode = true;
+    dl->state      = DL_DOWNLOADING;
+    if (eng->notify_hwnd)
+        PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
+                     (WPARAM)dl->id, (LPARAM)DL_DOWNLOADING);
+    LeaveCriticalSection(&eng->lock);
+
+    hc.eng = eng;
+    hc.dl  = dl;
+    memset(&run, 0, sizeof(run));
+    run.dl           = dl;
+    run.url          = dl->url;
+    run.referer      = dl->referer;
+    run.temp_path    = dl->temp_path;
+    run.out_path     = dl->out_path;
+    run.should_stop  = hls_engine_should_stop;
+    run.stop_ctx     = &hc;
+    run.on_progress  = hls_engine_progress;
+    run.progress_ctx = &hc;
+
+    st = dash_download_run(&run);
+
+    EnterCriticalSection(&eng->lock);
+    if (st == DASH_OK && dl->state == DL_DOWNLOADING) {
+        safe_strncpy(dl->out_path, run.final_path, sizeof(dl->out_path));
+        dl->total_size = (uint64_t)dl->downloaded;
+        dl->state = DL_COMPLETED;
+        eng->active_count--;
+        if (eng->notify_hwnd)
+            PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
+                         (WPARAM)dl->id, (LPARAM)DL_COMPLETED);
+    } else if (st != DASH_OK && st != DASH_ERR_STOPPED && dl->state == DL_DOWNLOADING) {
+        safe_strncpy(dl->fail_reason, run.error, sizeof(dl->fail_reason));
+        dl->state = DL_FAILED;
+        eng->active_count--;
+        if (eng->notify_hwnd)
+            PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
+                         (WPARAM)dl->id, (LPARAM)DL_FAILED);
+    } else if (st == DASH_ERR_STOPPED && dl->state == DL_DOWNLOADING && !dl->remove_pending) {
+        /* خاموش شدن برنامه: دانلود به Paused برمی‌گردد */
+        dl->state = DL_PAUSED;
+        eng->active_count--;
+        if (eng->notify_hwnd)
+            PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
+                         (WPARAM)dl->id, (LPARAM)DL_PAUSED);
+    }
+    cancelled = (dl->state == DL_CANCELLED);
+    LeaveCriticalSection(&eng->lock);
+
+    if (cancelled) {
+        /* لغو یعنی دور ریختن؛ pause کانتینر را نگه می‌دارد */
+        DeleteFileA(dl->temp_path);
+    }
+    return 0;
+}
+
 static DWORD WINAPI launch_thread_impl(LPVOID param) {
     LaunchCtx    *ctx = (LaunchCtx *)param;
     IDM_Engine   *eng = ctx->eng;
@@ -326,6 +398,10 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
     /* HLS / M3U8: کل جریان با resume در سطح segment (کانتینر .tels) */
     if (hls_download_wants(dl->url))
         return engine_hls_launch(eng, dl);
+
+    /* DASH / MPD: همان روش، با mux به MP4 */
+    if (dash_download_wants(dl->url))
+        return engine_dash_launch(eng, dl);
 
     /* ── ① discover (شبکه، بدون lock) ── */
     bool is_resume = false;
@@ -893,7 +969,7 @@ static DWORD WINAPI scheduler_thread_impl(LPVOID param) {
                                  (WPARAM)dl->id, 0);
 
                 /* HLS: خودش تکمیل و خطایابی می‌کند؛ مانیتور نباید آن را کامل کند */
-                if (dl->hls_mode) break;
+                if (dl->media_mode) break;
 
                 if (any_failed(dl))
                     auto_retry_failed_segs(dl, 10);

@@ -13,7 +13,7 @@ add_compile_options(-Wall -Wextra -DWIN32 -D_WIN32 -DWIN32_LEAN_AND_MEAN)
 add_compile_definitions($<$<CONFIG:Debug>:IDM_DEBUG>)
 
 set(SRC_FILES
-    src/engine.c src/segment.c src/http.c src/hls_download.c
+    src/engine.c src/segment.c src/http.c src/hls_download.c src/dash_download.c src/mp4_mux.c
     src/storage.c src/resume.c src/settings.c src/queue_persist.c
     src/lass_log.c
     src/secure_store.c
