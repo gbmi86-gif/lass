@@ -407,6 +407,11 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
     bool is_resume = false;
     {
         EnterCriticalSection(&eng->lock);
+        if (dl->resume_segs != NULL && dl->num_segments == 0) {
+            /* وضعیت ادامه بدون segment معتبر نیست؛ دانلود از اول انجام می‌شود */
+            free(dl->resume_segs);
+            dl->resume_segs = NULL;
+        }
         is_resume = (dl->resume_segs != NULL);
         LeaveCriticalSection(&eng->lock);
     }
@@ -783,6 +788,8 @@ static void host_stagger_record(IDM_Engine *eng, const char *host) {
 }
 
 static bool all_completed(IDM_Download *dl) {
+    /* بدون segment هیچ‌وقت «کامل» نیست؛ وگرنه یک دانلود خالی بی‌هیچ داده کامل اعلام می‌شد */
+    if (dl->num_segments == 0) return false;
     uint32_t done = 0;
     for (uint32_t i = 0; i < dl->num_segments; i++) {
         SEG_State ss = dl->segments[i]->state;
@@ -812,6 +819,7 @@ static bool any_failed_retryable(IDM_Download *dl, uint32_t max_retries) {
 }
 
 static bool all_done_or_failed(IDM_Download *dl) {
+    if (dl->num_segments == 0) return false;
     for (uint32_t i = 0; i < dl->num_segments; i++) {
         SEG_State s = dl->segments[i]->state;
         if (s == SEG_DOWNLOADING || s == SEG_CONNECTING || s == SEG_RETRYING)
@@ -970,6 +978,18 @@ static DWORD WINAPI scheduler_thread_impl(LPVOID param) {
 
                 /* HLS: خودش تکمیل و خطایابی می‌کند؛ مانیتور نباید آن را کامل کند */
                 if (dl->media_mode) break;
+
+                if (dl->num_segments == 0) {
+                    /* داخلی: DOWNLOADING بدون segment نباید بماند؛ شکست آشکار بهتر از کامل شدن یا گیر کردن است */
+                    safe_strncpy(dl->fail_reason, "internal error: download has no segments",
+                                 sizeof(dl->fail_reason));
+                    dl->state = DL_FAILED;
+                    eng->active_count--;
+                    if (eng->notify_hwnd)
+                        PostMessageA(eng->notify_hwnd, IDM_WM_STATE,
+                                     (WPARAM)dl->id, (LPARAM)DL_FAILED);
+                    break;
+                }
 
                 if (any_failed(dl))
                     auto_retry_failed_segs(dl, 10);

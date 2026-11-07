@@ -51,6 +51,7 @@
 #include "plugin_dash.h"
 #include "mp4_mux.h"
 #include "dash_download.h"
+#include "resume.h"
 #include "../src/hls_download.h"
 #include "plugin_proxy.h"
 #include "plugin_http_auth.h"
@@ -2589,8 +2590,21 @@ static BOOL launch_count_matches(IDM_Engine *eng) {
     return ok;
 }
 
+#define DT_CLEAN_NAME(n) do { char _cp[200]; DeleteFileA(n); \
+    snprintf(_cp, sizeof(_cp), "%s%s", (n), IDM_STATE_FILE_EXT); DeleteFileA(_cp); \
+    snprintf(_cp, sizeof(_cp), "%s.tels", (n)); DeleteFileA(_cp); } while (0)
+
 static void test_engine_action_during_launch(void) {
     SECTION("Engine: pausing, cancelling or scheduling a launching download keeps the active count right");
+    /* نام‌ها در هر اجرا یکتا هستند: فایل وضعیت یا temp اجرای قبلی به این تست نمی‌رسد */
+    char ua[200], ub[200], ud[200], na[120], nb[120], nd[120];
+    unsigned long tk = (unsigned long)GetTickCount();
+    snprintf(ua, sizeof(ua), "http://127.0.0.1:18483/launch_a_%lu.bin", tk);
+    snprintf(ub, sizeof(ub), "http://127.0.0.1:18483/launch_b_%lu.bin", tk);
+    snprintf(ud, sizeof(ud), "http://127.0.0.1:18483/launch_d_%lu.bin", tk);
+    snprintf(na, sizeof(na), "tels_test_launch_a_%lu.bin", tk);
+    snprintf(nb, sizeof(nb), "tels_test_launch_b_%lu.bin", tk);
+    snprintf(nd, sizeof(nd), "tels_test_launch_d_%lu.bin", tk);
     WSADATA wd;
     WSAStartup(MAKEWORD(2, 2), &wd);
     SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -2610,12 +2624,12 @@ static void test_engine_action_during_launch(void) {
     HANDLE th = CreateThread(NULL, 0, stall_server_proc, (LPVOID)(UINT_PTR)ls, 0, NULL);
 
     IDM_Engine *eng = engine_create(NULL);
-    IDM_Download *a = eng ? engine_add(eng, "http://127.0.0.1:18483/launch_a.bin",
-                                       "tels_test_launch_a.bin", 1, 0) : NULL;
-    IDM_Download *b = eng ? engine_add(eng, "http://127.0.0.1:18483/launch_b.bin",
-                                       "tels_test_launch_b.bin", 1, 0) : NULL;
-    IDM_Download *d = eng ? engine_add(eng, "http://127.0.0.1:18483/launch_d.bin",
-                                       "tels_test_launch_d.bin", 1, 0) : NULL;
+    IDM_Download *a = eng ? engine_add(eng, ua,
+                                       na, 1, 0) : NULL;
+    IDM_Download *b = eng ? engine_add(eng, ub,
+                                       nb, 1, 0) : NULL;
+    IDM_Download *d = eng ? engine_add(eng, ud,
+                                       nd, 1, 0) : NULL;
     TEST("three downloads queued", a != NULL && b != NULL && d != NULL);
 
     /* هر عمل وقتی انجام می‌شود که همان دانلود در حال launch است */
@@ -2650,9 +2664,9 @@ static void test_engine_action_during_launch(void) {
         WaitForSingleObject(th, 25000);
         CloseHandle(th);
     }
-    DeleteFileA("tels_test_launch_a.bin");
-    DeleteFileA("tels_test_launch_b.bin");
-    DeleteFileA("tels_test_launch_d.bin");
+    DT_CLEAN_NAME(na);
+    DT_CLEAN_NAME(nb);
+    DT_CLEAN_NAME(nd);
 }
 
 /* ======================================================
@@ -5824,6 +5838,85 @@ static void test_dash_media(void) {
     }
 }
 
+/* ======================================================
+   تست ۲۶: وضعیت ادامه‌ی بدون segment و دانلود صفربایتی
+   ====================================================== */
+static const uint8_t DT_ZERO_BODY[1] = {0};
+
+static void test_resume_and_zero_byte(void) {
+    IDM_Engine *eng;
+    IDM_Download *dl;
+    SECTION("Resume state with no segments is never saved, loaded or completed");
+    eng = engine_create(NULL);
+    TEST("engine created for resume checks", eng != NULL);
+    if (eng) eng->max_concurrent = 0;
+    dl = eng ? engine_add(eng, "http://127.0.0.1:18495/no_segments.bin", "tels_test_noseg.bin", 1, 0) : NULL;
+    TEST("download without segments is queued", dl != NULL && dl->num_segments == 0);
+    if (dl) {
+        char sp[IDM_MAX_PATH + 32];
+        FILE *f;
+        IDM_ResumeData hdr;
+        snprintf(sp, sizeof(sp), "%s%s", dl->out_path, IDM_STATE_FILE_EXT);
+        DeleteFileA(sp);
+        TEST("save refuses a download with no segments", !resume_save(dl));
+        TEST("no state file is written for it", GetFileAttributesA(sp) == INVALID_FILE_ATTRIBUTES);
+        f = fopen(sp, "wb");
+        TEST("stale zero-segment state file can be planted", f != NULL);
+        if (f) {
+            memset(&hdr, 0, sizeof(hdr));
+            hdr.magic = 0x49444D52u;
+            hdr.version = 1;
+            hdr.num_segments = 0;
+            snprintf(hdr.url, sizeof(hdr.url), "%s", dl->url);
+            snprintf(hdr.out_path, sizeof(hdr.out_path), "%s", dl->out_path);
+            fwrite(&hdr, sizeof(hdr), 1, f);
+            fclose(f);
+        }
+        TEST("loader rejects a state with no segments", !resume_load(dl));
+        TEST("loader leaves no resume data on the download", dl->resume_segs == NULL);
+        TEST("stale zero-segment state file is removed", GetFileAttributesA(sp) == INVALID_FILE_ATTRIBUTES);
+    }
+    engine_destroy(eng);
+    DT_CLEAN_NAME("tels_test_noseg.bin");
+
+    if (hls_test_server_start(18495)) {
+        DL_State st = DL_IDLE;
+        IDM_Download *z;
+        IDM_Engine *e2 = engine_create(NULL);
+        DWORD t0;
+        unsigned seen_states = 0;
+        hls_test_server_set("/zero_byte.bin", DT_ZERO_BODY, 0);
+        z = e2 ? engine_add(e2, "http://127.0.0.1:18495/zero_byte.bin", "tels_test_zero_byte.bin", 1, 0) : NULL;
+        TEST("zero-byte download is queued", z != NULL);
+        t0 = GetTickCount();
+        while (z && GetTickCount() - t0 < 20000u) {
+            EnterCriticalSection(&e2->lock);
+            st = z->state;
+            seen_states |= 1u << (unsigned)st;
+            LeaveCriticalSection(&e2->lock);
+            if (st == DL_COMPLETED || st == DL_FAILED) break;
+            Sleep(50);
+        }
+        if (z && st != DL_COMPLETED)
+            printf("    (zero-byte: final state=%d, states seen=0x%x, total=%llu, downloaded=%llu, reason=\"%s\")\n",
+                   (int)st, seen_states, (unsigned long long)z->total_size,
+                   (unsigned long long)z->downloaded, z->fail_reason);
+        TEST("zero-byte download completes", z != NULL && st == DL_COMPLETED);
+        if (z && st == DL_COMPLETED) {
+            WIN32_FILE_ATTRIBUTE_DATA fa;
+            memset(&fa, 0, sizeof(fa));
+            TEST("zero-byte output file exists and is empty",
+                 GetFileAttributesExA(z->out_path, GetFileExInfoStandard, &fa) &&
+                 fa.nFileSizeHigh == 0 && fa.nFileSizeLow == 0);
+        }
+        engine_destroy(e2);
+        hls_test_server_stop();
+        DT_CLEAN_NAME("tels_test_zero_byte.bin");
+    } else {
+        TEST("test server for zero-byte download starts", FALSE);
+    }
+}
+
 static void test_hls_all(void) {
     if (!hls_test_server_start(18480)) {
         TEST("HLS test server listens on loopback", FALSE);
@@ -5920,6 +6013,7 @@ int main(void) {
     test_browser_ext();
     test_dash();
     test_dash_media();
+    test_resume_and_zero_byte();
     test_notify();
     test_categories();
     test_rtmp();

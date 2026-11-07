@@ -133,14 +133,16 @@ static void handle_conn(SOCKET cs) {
         if (strstr(req, "\r\n\r\n")) break;
     }
     req[got] = '\0';
-    if (strncmp(req, "GET ", 4) != 0) {
+    /* HEAD همان سرآیندهای GET را بدون بدنه می‌دهد؛ discovery قبل از دانلود از آن استفاده می‌کند */
+    BOOL is_head = (strncmp(req, "HEAD ", 5) == 0);
+    if (!is_head && strncmp(req, "GET ", 4) != 0) {
         closesocket(cs);
         return;
     }
 
     char path[HLS_TS_PATH] = "";
     size_t pn = 0;
-    const char *p = req + 4;
+    const char *p = req + (is_head ? 5 : 4);
     while (p[pn] && p[pn] != ' ' && pn < sizeof(path) - 1) {
         path[pn] = p[pn];
         pn++;
@@ -212,7 +214,7 @@ static void handle_conn(SOCKET cs) {
                    "Content-Length: %u\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
                    (unsigned int)blen);
     send_all(cs, head, (size_t)hl);
-    send_all(cs, body, blen);
+    if (!is_head) send_all(cs, body, blen);
     closesocket(cs);
 }
 

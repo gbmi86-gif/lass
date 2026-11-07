@@ -524,7 +524,10 @@ HTTP_Conn *http_open_range_status(const char *url, const char *referer,
                  "Range: bytes=%llu-\r\n",
                  (unsigned long long)start);
 
-    HttpAddRequestHeadersA(conn->hRequest, range_hdr, -1L,
+    /* (0,0) یعنی کل فایل از اول با طول نامعلوم؛ بدون Range تا فایل صفربایتی
+       (که به هر Range جواب 416 می‌دهد) کامل شود */
+    if (!(start == 0 && end == 0))
+        HttpAddRequestHeadersA(conn->hRequest, range_hdr, -1L,
                            HTTP_ADDREQ_FLAG_ADD | HTTP_ADDREQ_FLAG_REPLACE);
     HttpAddRequestHeadersA(conn->hRequest,
                            "User-Agent: " IDM_AGENT "\r\n",

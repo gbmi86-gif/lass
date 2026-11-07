@@ -32,6 +32,13 @@ bool resume_save(IDM_Download *dl) {
     char state_path[IDM_MAX_PATH];
     make_state_path(dl->out_path, state_path, sizeof(state_path));
 
+    /* بدون segment چیزی برای ادامه نیست. ذخیره‌ی چنین وضعیتی باعث می‌شد دانلود بعدی
+       بدون هیچ شبکه‌ای «کامل» شود؛ پس فایل قبلی هم پاک می‌شود. */
+    if (dl->num_segments == 0 || !dl->segments) {
+        DeleteFileA(state_path);
+        return false;
+    }
+
     FILE *f = fopen(state_path, "wb");
     if (!f) return false;
 
@@ -97,6 +104,13 @@ bool resume_load(IDM_Download *dl) {
     /* Validate URL matches */
     if (strcmp(hdr.url, dl->url) != 0) {
         fclose(f);
+        return false;
+    }
+
+    /* وضعیت بدون segment قابل ادامه نیست (نسخه‌های قبلی چنین فایلی می‌نوشتند). پاک می‌شود. */
+    if (hdr.num_segments == 0) {
+        fclose(f);
+        DeleteFileA(state_path);
         return false;
     }
 
