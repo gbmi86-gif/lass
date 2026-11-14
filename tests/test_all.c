@@ -1,6 +1,8 @@
 #include "test_common.h"
 
 int main(void) {
+    atexit(test_sweep_stale_state);
+    test_sweep_stale_state();
     SetConsoleOutputCP(CP_UTF8);   /* خروجی فارسی و خط تیره درست نمایش داده شود */
     /* داده‌ی تست جدا از داده‌ی واقعی کاربر است: ini، cookies، فروشگاه، رجیستری و استارت به پوشه‌ی موقت می‌روند */
     {

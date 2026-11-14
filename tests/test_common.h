@@ -190,4 +190,6 @@ void test_hls_all(void);
 /* shared helpers (defined in their topic module) */
 BOOL bytes_contain(const char *data, size_t n, const char *needle);
 BOOL test_read_file(const char *path, uint8_t **out, size_t *len);
+/* removes leftover test state files (*test*.idmstate) from earlier runs */
+void test_sweep_stale_state(void);
 #endif /* LASS_TEST_COMMON_H */

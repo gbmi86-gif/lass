@@ -313,6 +313,7 @@ void test_segment_policy_parks_stuck_range(void) {
     TEST("the stop reason counts all 10 attempts", strstr(reason, "(10 attempts") != NULL);
     DeleteFileA("policy_test.bin");
     DeleteFileA("policy_test.bin.tels");
+    DT_CLEAN_NAME("policy_test.bin");
 }
 
 /* ======================================================
