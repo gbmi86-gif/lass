@@ -25,6 +25,7 @@
 
 #include "hls_download.h"
 #include "http.h"
+#include "media_http.h"
 #include "tels_container.h"
 #include "lass_log.h"
 #include "../plugins/plugin_hls.h"
@@ -42,11 +43,7 @@
 #define HLS_RETRY_CAP_SEC  60u
 #define HLS_META_NAME      "hls.meta"
 
-typedef struct {
-    uint8_t *data;
-    uint64_t len;
-    uint64_t cap;
-} HlsBuf;
+typedef MediaBuf HlsBuf;
 
 typedef struct {
     uint8_t ok[HLS_MAX_KEYS];
@@ -72,149 +69,59 @@ static void run_error(HlsRun *run, const char *fmt, ...) {
     run->error[sizeof(run->error) - 1] = '\0';
 }
 
-static BOOL run_stop(const HlsRun *run) {
-    return (run->should_stop && run->should_stop(run->stop_ctx)) ? TRUE : FALSE;
+/* ── HTTP و بافر مشترک (media_http.c) ─────────────────────────────── */
+static MediaHttp hls_http(const HlsRun *run) {
+    MediaHttp h;
+    h.dl = run->dl;
+    h.referer = run->referer;
+    h.should_stop = run->should_stop;
+    h.stop_ctx = run->stop_ctx;
+    return h;
 }
 
-/* خواب کوتاه‌شده با بررسی توقف؛ FALSE یعنی متوقف شد */
-static BOOL sleep_checked(const HlsRun *run, uint32_t ms) {
-    uint32_t left = ms;
-    while (left > 0) {
-        if (run_stop(run)) return FALSE;
-        uint32_t step = left > 100u ? 100u : left;
-        Sleep(step);
-        left -= step;
-    }
-    return !run_stop(run);
+static BOOL run_stop(const HlsRun *run) {
+    MediaHttp h = hls_http(run);
+    return media_stopped(&h);
 }
+
+static BOOL sleep_checked(const HlsRun *run, uint32_t ms) {
+    MediaHttp h = hls_http(run);
+    return media_sleep_checked(&h, ms);
+}
+
+static void buf_free(HlsBuf *b) {
+    media_buf_free(b);
+}
+
+
+
 
 static void report(const HlsRun *run, uint64_t bytes, uint32_t done, uint32_t total) {
     if (run->on_progress) run->on_progress(bytes, done, total, run->progress_ctx);
 }
 
-static BOOL buf_reserve(HlsBuf *b, uint64_t need) {
-    if (need <= b->cap) return TRUE;
-    if (need > HLS_SEG_MAX) return FALSE;
-    uint64_t cap = b->cap ? b->cap : (1024u * 1024u);
-    while (cap < need) cap *= 2u;
-    if (cap > HLS_SEG_MAX) cap = HLS_SEG_MAX;
-    uint8_t *n = (uint8_t *)realloc(b->data, (size_t)cap);
-    if (!n) return FALSE;
-    b->data = n;
-    b->cap = cap;
-    return TRUE;
-}
 
-static void buf_free(HlsBuf *b) {
-    free(b->data);
-    b->data = NULL;
-    b->len = 0;
-    b->cap = 0;
-}
 
 /* ======================================================
    HTTP: یک GET (با Range اختیاری) و خواندن کل بدنه
    ====================================================== */
 
-/* کد خروجی در *status_out: ۰ خطای شبکه، -1 سرور Range را نادیده گرفت، -2 بدنه از سقف بزرگ‌تر است */
-static HlsStatus http_fetch(HlsRun *run, const char *url, uint64_t start, uint64_t end,
-                            uint64_t max_len, BOOL need_partial, HlsBuf *out,
-                            int *status_out, uint32_t *retry_after) {
-    out->len = 0;
-    *status_out = 0;
-    *retry_after = 0;
-    int st = 0;
-    uint32_t ra = 0;
-    HTTP_Conn *conn = http_open_range_status(url, run->referer, run->dl,
-                                             start, end, &ra, &st);
-    if (!conn) {
-        *status_out = st;
-        *retry_after = ra;
-        return HLS_ERR_FETCH;
-    }
-    if (need_partial && !http_conn_got_partial(conn)) {
-        http_close(conn);
-        *status_out = -1;
-        return HLS_ERR_FETCH;
-    }
-    for (;;) {
-        if (run_stop(run)) {
-            http_close(conn);
-            return HLS_ERR_STOPPED;
-        }
-        if (out->len >= max_len) {
-            /* سقف رسیده؛ اگر هنوز داده هست بدنه بزرگ‌تر از حد است */
-            uint8_t probe = 0;
-            int pn = http_read(conn, &probe, 1);
-            http_close(conn);
-            if (pn > 0) {
-                *status_out = -2;
-                return HLS_ERR_IO;
-            }
-            if (pn < 0) return HLS_ERR_FETCH;
-            return HLS_OK;
-        }
-        uint64_t room = max_len - out->len;
-        uint32_t want = room > HLS_READ_CHUNK ? HLS_READ_CHUNK : (uint32_t)room;
-        if (!buf_reserve(out, out->len + want)) {
-            http_close(conn);
-            *status_out = -2;
-            return HLS_ERR_IO;
-        }
-        int n = http_read(conn, out->data + out->len, (int)want);
-        if (n < 0) {
-            http_close(conn);
-            return HLS_ERR_FETCH;
-        }
-        if (n == 0) {
-            http_close(conn);
-            return HLS_OK;
-        }
-        out->len += (uint64_t)n;
-    }
-}
 
-/* همان GET با تلاش مجدد: 429/503 با Retry-After، خطای شبکه با ۱ و ۲ و ۴ ثانیه؛
-   404/401/403/410 و بقیه‌ی 4xx دائمی هستند و دوباره امتحان نمی‌شوند. */
+/* 429/503 با Retry-After، خطای شبکه با ۱ و ۲ و ۴ ثانیه؛ 401/403/404/410 دائمی‌اند */
 static HlsStatus fetch_retry(HlsRun *run, const char *url, uint64_t start, uint64_t end,
                              uint64_t max_len, BOOL need_partial, uint32_t attempts,
                              HlsBuf *out, const char *what) {
-    int last = 0;
-    for (uint32_t a = 1; a <= attempts; a++) {
-        int st = 0;
-        uint32_t ra = 0;
-        HlsStatus r = http_fetch(run, url, start, end, max_len, need_partial, out, &st, &ra);
-        if (r == HLS_OK) return HLS_OK;
-        if (r == HLS_ERR_STOPPED) return r;
-        last = st;
-        if (st == -1) {
-            run_error(run, "%s: the server ignored the byte range request", what);
-            return HLS_ERR_FETCH;
-        }
-        if (st == -2) {
-            run_error(run, "%s is larger than the supported size", what);
-            return HLS_ERR_FETCH;
-        }
-        if (st == 401 || st == 403 || st == 404 || st == 410) {
-            run_error(run, "%s: HTTP %d", what, st);
-            return HLS_ERR_NOT_FOUND;
-        }
-        if (st >= 400 && st < 500 && st != 408 && st != 429) {
-            run_error(run, "%s: HTTP %d", what, st);
-            return HLS_ERR_FETCH;
-        }
-        if (a == attempts) break;
-        uint32_t wait_s = (ra > 0)
-            ? (ra > HLS_RETRY_CAP_SEC ? HLS_RETRY_CAP_SEC : ra)
-            : (1u << (a - 1u));
-        if (!sleep_checked(run, wait_s * 1000u)) return HLS_ERR_STOPPED;
-    }
-    if (last > 0)
-        run_error(run, "%s: HTTP %d after %u attempts", what, last, (unsigned)attempts);
-    else
-        run_error(run, "%s: network error after %u attempts", what, (unsigned)attempts);
-    return HLS_ERR_FETCH;
+    MediaHttp h = hls_http(run);
+    char err[sizeof(run->error)];
+    MediaResult r = media_fetch(&h, url, start, end, max_len, need_partial, attempts,
+                                out, what, err, sizeof(err));
+    if (r == MEDIA_OK) return HLS_OK;
+    if (r == MEDIA_STOPPED) return HLS_ERR_STOPPED;
+    run_error(run, "%s", err);
+    return r == MEDIA_NOT_FOUND ? HLS_ERR_NOT_FOUND : HLS_ERR_FETCH;
 }
+
+
 
 /* segment: کامل، یا زیربازه‌ی دقیق با Range (سرور باید 206 بدهد) */
 static HlsStatus fetch_segment(HlsRun *run, const HLS_Playlist *pl, uint32_t i, HlsBuf *out) {

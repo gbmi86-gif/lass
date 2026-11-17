@@ -18,6 +18,7 @@
 
 #include "dash_download.h"
 #include "http.h"
+#include "media_http.h"
 #include "tels_container.h"
 #include "lass_log.h"
 #include "mp4_mux.h"
@@ -42,33 +43,38 @@
 /* ======================================================
    بافر و کمک‌های عمومی
    ====================================================== */
-typedef struct {
-    uint8_t *data;
-    uint64_t len;
-    uint64_t cap;
-} DashBuf;
+typedef MediaBuf DashBuf;
 
-static void buf_free(DashBuf *b) {
-    free(b->data);
-    b->data = NULL;
-    b->len = 0;
-    b->cap = 0;
+/* ── HTTP و بافر مشترک (media_http.c) ─────────────────────────────── */
+static MediaHttp dash_http(const DashRun *run) {
+    MediaHttp h;
+    h.dl = run->dl;
+    h.referer = run->referer;
+    h.should_stop = run->should_stop;
+    h.stop_ctx = run->stop_ctx;
+    return h;
+}
+
+static BOOL run_stop(const DashRun *run) {
+    MediaHttp h = dash_http(run);
+    return media_stopped(&h);
+}
+
+static BOOL sleep_checked(const DashRun *run, uint32_t ms) {
+    MediaHttp h = dash_http(run);
+    return media_sleep_checked(&h, ms);
 }
 
 static BOOL buf_reserve(DashBuf *b, uint64_t need, uint64_t max) {
-    uint64_t cap;
-    uint8_t *n;
-    if (need <= b->cap) return TRUE;
-    if (need > max) return FALSE;
-    cap = b->cap ? b->cap : (1024u * 1024u);
-    while (cap < need) cap *= 2u;
-    if (cap > max) cap = max;
-    n = (uint8_t *)realloc(b->data, (size_t)cap);
-    if (!n) return FALSE;
-    b->data = n;
-    b->cap = cap;
-    return TRUE;
+    return media_buf_reserve(b, need, max);
 }
+
+static void buf_free(DashBuf *b) {
+    media_buf_free(b);
+}
+
+
+
 
 static void str_copy(char *dst, size_t dst_sz, const char *src) {
     size_t n;
@@ -87,116 +93,27 @@ static void run_error(DashRun *run, const char *fmt, ...) {
     run->error[sizeof(run->error) - 1] = '\0';
 }
 
-static BOOL run_stop(const DashRun *run) {
-    return (run->should_stop && run->should_stop(run->stop_ctx)) ? TRUE : FALSE;
-}
 
-/* خواب کوتاه‌شده با بررسی توقف؛ FALSE یعنی متوقف شد */
-static BOOL sleep_checked(const DashRun *run, uint32_t ms) {
-    uint32_t left = ms;
-    while (left > 0) {
-        uint32_t step;
-        if (run_stop(run)) return FALSE;
-        step = left > 100u ? 100u : left;
-        Sleep(step);
-        left -= step;
-    }
-    return !run_stop(run);
-}
 
 static void report(const DashRun *run, uint64_t bytes, uint32_t done, uint32_t total) {
     if (run->on_progress) run->on_progress(bytes, done, total, run->progress_ctx);
 }
 
-/* ======================================================
-   HTTP: یک GET کامل و تلاش مجدد با همان قواعد HLS
-   ====================================================== */
-static DashStatus http_fetch(DashRun *run, const char *url, uint64_t max_len, DashBuf *out,
-                             int *status_out, uint32_t *retry_after) {
-    uint32_t ra = 0;
-    int st = 0;
-    HTTP_Conn *conn;
-    out->len = 0;
-    *status_out = 0;
-    *retry_after = 0;
-    conn = http_open_range_status(url, run->referer, run->dl, 0, 0, &ra, &st);
-    if (!conn) {
-        *status_out = st;
-        *retry_after = ra;
-        return DASH_ERR_FETCH;
-    }
-    for (;;) {
-        uint64_t room;
-        uint32_t want;
-        int n;
-        if (run_stop(run)) {
-            http_close(conn);
-            return DASH_ERR_STOPPED;
-        }
-        if (out->len >= max_len) {
-            uint8_t probe = 0;
-            int pn = http_read(conn, &probe, 1);
-            http_close(conn);
-            if (pn > 0) {
-                *status_out = -2;   /* بدنه از سقف بزرگ‌تر است */
-                return DASH_ERR_IO;
-            }
-            return pn < 0 ? DASH_ERR_FETCH : DASH_OK;
-        }
-        room = max_len - out->len;
-        want = room > DASH_READ_CHUNK ? DASH_READ_CHUNK : (uint32_t)room;
-        if (!buf_reserve(out, out->len + want, max_len)) {
-            http_close(conn);
-            *status_out = -2;
-            return DASH_ERR_IO;
-        }
-        n = http_read(conn, out->data + out->len, (int)want);
-        if (n < 0) {
-            http_close(conn);
-            return DASH_ERR_FETCH;
-        }
-        if (n == 0) {
-            http_close(conn);
-            return DASH_OK;
-        }
-        out->len += (uint64_t)n;
-    }
+
+/* همان قاعدهٔ HLS با حجم سقف هر فراخوانی؛ DASH فقط GET کامل لازم دارد */
+static DashStatus fetch_retry(DashRun *run, const char *url, uint64_t max_len,
+                              DashBuf *out, const char *what) {
+    MediaHttp h = dash_http(run);
+    char err[sizeof(run->error)];
+    MediaResult r = media_fetch(&h, url, 0, 0, max_len, FALSE, DASH_FETCH_TRIES,
+                                out, what, err, sizeof(err));
+    if (r == MEDIA_OK) return DASH_OK;
+    if (r == MEDIA_STOPPED) return DASH_ERR_STOPPED;
+    run_error(run, "%s", err);
+    return r == MEDIA_NOT_FOUND ? DASH_ERR_NOT_FOUND : DASH_ERR_FETCH;
 }
 
-/* 429/503 با Retry-After، خطای شبکه با ۱ و ۲ و ۴ ثانیه؛ 401/403/404/410 دائمی‌اند */
-static DashStatus fetch_retry(DashRun *run, const char *url, uint64_t max_len, DashBuf *out,
-                              const char *what) {
-    int last = 0;
-    uint32_t a;
-    for (a = 1; a <= DASH_FETCH_TRIES; a++) {
-        int st = 0;
-        uint32_t ra = 0, wait_s;
-        DashStatus r = http_fetch(run, url, max_len, out, &st, &ra);
-        if (r == DASH_OK) return DASH_OK;
-        if (r == DASH_ERR_STOPPED) return r;
-        last = st;
-        if (st == -2) {
-            run_error(run, "%s is larger than the supported size", what);
-            return DASH_ERR_FETCH;
-        }
-        if (st == 401 || st == 403 || st == 404 || st == 410) {
-            run_error(run, "%s: HTTP %d", what, st);
-            return DASH_ERR_NOT_FOUND;
-        }
-        if (st >= 400 && st < 500 && st != 408 && st != 429) {
-            run_error(run, "%s: HTTP %d", what, st);
-            return DASH_ERR_FETCH;
-        }
-        if (a == DASH_FETCH_TRIES) break;
-        wait_s = (ra > 0) ? (ra > DASH_RETRY_CAP_SEC ? DASH_RETRY_CAP_SEC : ra) : (1u << (a - 1u));
-        if (!sleep_checked(run, wait_s * 1000u)) return DASH_ERR_STOPPED;
-    }
-    if (last > 0)
-        run_error(run, "%s: HTTP %d after %u attempts", what, last, (unsigned)DASH_FETCH_TRIES);
-    else
-        run_error(run, "%s: network error after %u attempts", what, (unsigned)DASH_FETCH_TRIES);
-    return DASH_ERR_FETCH;
-}
+
 
 /* ======================================================
    کانتینر موقت

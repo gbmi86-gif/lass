@@ -80,6 +80,7 @@ int main(void) {
     test_browser_ext();
     test_dash();
     test_dash_media();
+    test_media_http();
     test_resume_and_zero_byte();
     test_notify();
     test_categories();
