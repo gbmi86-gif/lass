@@ -1,5 +1,6 @@
 /* engine: download engine tests (tests/test_engine.c) */
 #include "test_common.h"
+#include "test_hls_server.h"
 
 /* ======================================================
    تست ۱۴: Engine — scheduler، batch، clear_completed
@@ -676,90 +677,146 @@ void test_engine_action_during_launch(void) {
 /* ======================================================
    تست: Launch Retry Backoff — retry خودکار discovery failures
    ====================================================== */
+#define TEA_CLOSED_URL "http://127.0.0.1:18597/f.zip"  /* هیچ سروری روی این پورت نیست */
+#define TEA_SRV_PORT   18601
+
+static BOOL tea_wait_count(IDM_Download *dl, uint32_t want, DWORD timeout_ms) {
+    DWORD t0 = GetTickCount();
+    while (GetTickCount() - t0 < timeout_ms) {
+        if (dl->launch_retry_count >= want) return TRUE;
+        if (dl->state == DL_FAILED) return FALSE;
+        Sleep(50);
+    }
+    return FALSE;
+}
+
+static BOOL tea_wait_failed(IDM_Download *dl, DWORD timeout_ms) {
+    DWORD t0 = GetTickCount();
+    while (GetTickCount() - t0 < timeout_ms) {
+        if (dl->state == DL_FAILED) return TRUE;
+        Sleep(50);
+    }
+    return FALSE;
+}
+
+static void tea_url(char *out, size_t sz, const char *path) {
+    snprintf(out, sz, "http://127.0.0.1:%d%s", (int)TEA_SRV_PORT, path);
+}
+
 void test_launch_retry_backoff(void) {
-    SECTION("Engine: Launch Retry Backoff");
+    SECTION("Engine: Launch Retry Backoff (real failed discoveries on a refused connection)");
 
     IDM_Engine *eng = engine_create(NULL);
     TEST("engine create", eng != NULL);
     if (!eng) return;
 
-    IDM_Download *dl = engine_add(eng, "http://x.com/f.zip", "C:\\f.zip", 4, 0);
+    IDM_Download *dl = engine_add(eng, TEA_CLOSED_URL, "C:\\f.zip", 4, 0);
     TEST("download added", dl != NULL);
     if (!dl) { engine_destroy(eng); return; }
 
-    /* شبیه‌سازی دستی یه شکست discovery — چون واقعاً شبکه نداریم،
-       مستقیم منطق retry رو با تنظیم فیلدها تست می‌کنیم */
-    TEST("launch_retry_count starts at 0", dl->launch_retry_count == 0);
-    TEST("next_launch_retry_at starts at 0", dl->next_launch_retry_at == 0);
+    BOOL first = tea_wait_count(dl, 1, 10000);
+    TEST("a failed discovery is retried, not failed", first && dl->state == DL_QUEUED);
+    LONG wait1 = (LONG)(dl->next_launch_retry_at - GetTickCount());
+    TEST("the first retry waits about 3 s", wait1 >= 2500 && wait1 <= 3000);
 
-    /* شبیه‌سازی افزایش بعد از شکست اول */
-    dl->launch_retry_count = 1;
-    DWORD backoff1 = 3000u * (1u << (dl->launch_retry_count - 1));
-    TEST("first backoff is 3000ms", backoff1 == 3000);
+    Sleep(1000);
+    TEST("the scheduler does not retry during the backoff", dl->launch_retry_count == 1);
 
-    dl->launch_retry_count = 3;
-    DWORD backoff3 = 3000u * (1u << (dl->launch_retry_count - 1));
-    TEST("third backoff is 12000ms", backoff3 == 12000);
+    dl->next_launch_retry_at = GetTickCount() - 1;   /* the window has passed */
+    BOOL second = tea_wait_count(dl, 2, 5000);
+    LONG wait2 = (LONG)(dl->next_launch_retry_at - GetTickCount());
+    TEST("once the window passes the download is tried again", second);
+    TEST("the second retry waits about 6 s", wait2 >= 5500 && wait2 <= 6000);
 
-    dl->launch_retry_count = 10; /* خیلی زیاد */
-    DWORD backoff10 = 3000u * (1u << (dl->launch_retry_count - 1));
-    if (backoff10 > 60000) backoff10 = 60000;
-    TEST("backoff caps at 60000ms", backoff10 == 60000);
+    dl->launch_retry_count = 2;                         /* the next failure is the third */
+    dl->next_launch_retry_at = GetTickCount() - 1;
+    BOOL third = tea_wait_count(dl, 3, 5000);
+    LONG wait3 = (LONG)(dl->next_launch_retry_at - GetTickCount());
+    TEST("the third retry waits about 12 s", third && wait3 >= 11500 && wait3 <= 12000);
 
-    TEST("ENGINE_MAX_LAUNCH_RETRY is reasonable",
-         ENGINE_MAX_LAUNCH_RETRY >= 3 && ENGINE_MAX_LAUNCH_RETRY <= 10);
-
-    /* تست اینکه scheduler واقعاً به next_launch_retry_at احترام
-       میذاره — یه دانلود با retry timer در آینده رو QUEUED می‌ذاریم
-       و بررسی می‌کنیم که با یه scheduler tick دستی، launch نشه */
-    dl->state = DL_QUEUED;
-    dl->next_launch_retry_at = GetTickCount() + 10000; /* ۱۰ ثانیه بعد */
-    BOOL should_wait = (dl->next_launch_retry_at != 0 &&
-                        GetTickCount() < dl->next_launch_retry_at);
-    TEST("scheduler would skip download still in backoff", should_wait);
-
-    /* بعد از گذشت زمان، باید آزاد بشه */
-    dl->next_launch_retry_at = GetTickCount() - 1000; /* در گذشته */
-    BOOL should_launch_now = !(dl->next_launch_retry_at != 0 &&
-                               GetTickCount() < dl->next_launch_retry_at);
-    TEST("scheduler would launch after backoff expires", should_launch_now);
+    dl->launch_retry_count = ENGINE_MAX_LAUNCH_RETRY;   /* the next failure is past the limit */
+    dl->next_launch_retry_at = GetTickCount() - 1;
+    BOOL gave_up = tea_wait_failed(dl, 5000);
+    TEST("when the retries run out the download fails", gave_up);
+    TEST("the failure reason says the retries ran out",
+         strstr(dl->fail_reason, "multiple retries") != NULL);
 
     engine_destroy(eng);
-    TEST("engine destroy", TRUE);
 }
 
 /* ======================================================
    تست: خطای دائمی (404) در برابر موقتی — نباید retry بشه
    ====================================================== */
 void test_permanent_vs_transient_errors(void) {
-    SECTION("Engine: Permanent (404) vs Transient Error Handling");
+    SECTION("Engine: permanent HTTP errors fail at once, transient ones are retried");
 
-    /* IDM_ERR_NOT_FOUND باید از IDM_ERR_NETWORK متمایز باشه —
-       این دو enum value باید متفاوت باشن تا منطق engine.c
-       بتونه بین‌شون تمایز قائل بشه */
-    TEST("NOT_FOUND differs from NETWORK error",
-         IDM_ERR_NOT_FOUND != IDM_ERR_NETWORK);
-    TEST("NOT_FOUND is a distinct negative error code",
-         IDM_ERR_NOT_FOUND < 0);
-
-    /* شبیه‌سازی منطق permanent-detection که در http.c هست */
-    struct { int status; BOOL should_be_permanent; } cases[] = {
-        {404, TRUE},   /* پیدا نشد — دائمی */
-        {410, TRUE},   /* دیگه موجود نیست — دائمی */
-        {400, TRUE},   /* درخواست بدشکل — دائمی */
-        {401, TRUE},   /* نیاز به احراز هویت — دائمی */
-        {403, FALSE},  /* می‌تونه rate-limit موقتی باشه */
-        {429, FALSE},  /* too many requests — موقتی */
-        {500, FALSE},  /* خطای سرور — موقتی */
-        {503, FALSE},  /* سرویس در دسترس نیست — موقتی */
+    static const struct { const char *path; int status; } permanent[] = {
+        {"/gone.bin", 404}, {"/old.bin", 410}, {"/bad.bin", 400}, {"/auth.bin", 401},
     };
-    BOOL all_correct = TRUE;
-    for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
-        BOOL permanent = (cases[i].status == 404 || cases[i].status == 410 ||
-                          cases[i].status == 400 || cases[i].status == 401);
-        if (permanent != cases[i].should_be_permanent) all_correct = FALSE;
+    static const struct { const char *path; int status; } transient[] = {
+        {"/forbidden.bin", 403}, {"/limit.bin", 429}, {"/broken.bin", 500}, {"/busy.bin", 503},
+    };
+    size_t i;
+    char url[160];
+    BOOL perm_ok = TRUE, trans_ok = TRUE;
+
+    BOOL srv = hls_test_server_start(TEA_SRV_PORT);
+    TEST("test server starts", srv);
+    if (!srv) return;
+
+    for (i = 0; i < sizeof(permanent) / sizeof(permanent[0]); i++)
+        hls_test_server_fail(permanent[i].path, permanent[i].status, 0);
+    for (i = 0; i < sizeof(transient) / sizeof(transient[0]); i++)
+        hls_test_server_fail(transient[i].path, transient[i].status, 0);
+    hls_test_server_fail_retry_after("/busy7.bin", 503, 0, 7);
+    hls_test_server_fail_retry_after("/busyhuge.bin", 503, 0, 400);
+
+    for (i = 0; i < sizeof(permanent) / sizeof(permanent[0]); i++) {
+        IDM_Engine *eng = engine_create(NULL);
+        tea_url(url, sizeof(url), permanent[i].path);
+        IDM_Download *dl = eng ? engine_add(eng, url, "C:\\f.zip", 4, 0) : NULL;
+        if (!dl || !tea_wait_failed(dl, 5000) || dl->launch_retry_count != 0) perm_ok = FALSE;
+        if (eng) engine_destroy(eng);
     }
-    TEST("permanent/transient classification matches expected", all_correct);
+    TEST("404, 410, 400 and 401 fail at once, without a retry", perm_ok);
+
+    for (i = 0; i < sizeof(transient) / sizeof(transient[0]); i++) {
+        IDM_Engine *eng = engine_create(NULL);
+        tea_url(url, sizeof(url), transient[i].path);
+        IDM_Download *dl = eng ? engine_add(eng, url, "C:\\f.zip", 4, 0) : NULL;
+        if (!dl || !tea_wait_count(dl, 1, 5000) || dl->state != DL_QUEUED) trans_ok = FALSE;
+        if (eng) engine_destroy(eng);
+    }
+    TEST("403, 429, 500 and 503 are retried after a backoff", trans_ok);
+
+    {
+        IDM_Engine *eng = engine_create(NULL);
+        IDM_Download *dl = eng ? engine_add(eng, TEA_CLOSED_URL, "C:\\f.zip", 4, 0) : NULL;
+        BOOL retried = dl && tea_wait_count(dl, 1, 5000) && dl->state == DL_QUEUED;
+        TEST("a refused connection is retried, not failed", retried);
+        if (eng) engine_destroy(eng);
+    }
+    {
+        IDM_Engine *eng = engine_create(NULL);
+        tea_url(url, sizeof(url), "/busy7.bin");
+        IDM_Download *dl = eng ? engine_add(eng, url, "C:\\f.zip", 4, 0) : NULL;
+        BOOL got = dl && tea_wait_count(dl, 1, 5000);
+        LONG w = got ? (LONG)(dl->next_launch_retry_at - GetTickCount()) : 0;
+        TEST("Retry-After from the server replaces the table (7 s, not 3 s)",
+             got && w >= 6500 && w <= 7000);
+        if (eng) engine_destroy(eng);
+    }
+    {
+        IDM_Engine *eng = engine_create(NULL);
+        tea_url(url, sizeof(url), "/busyhuge.bin");
+        IDM_Download *dl = eng ? engine_add(eng, url, "C:\\f.zip", 4, 0) : NULL;
+        BOOL got = dl && tea_wait_count(dl, 1, 5000);
+        LONG w = got ? (LONG)(dl->next_launch_retry_at - GetTickCount()) : 0;
+        TEST("a Retry-After above the limit is capped at 300 s", got && w >= 298000 && w <= 300000);
+        if (eng) engine_destroy(eng);
+    }
+
+    hls_test_server_stop();
 }
 
 /* ======================================================

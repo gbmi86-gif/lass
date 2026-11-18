@@ -19,7 +19,7 @@ struct IDM_Download;
 typedef enum {
     DASH_OK = 0,
     DASH_ERR_FETCH,        /* خطای شبکه یا HTTP که بعد از تلاش‌های مجدد هم رفع نشد */
-    DASH_ERR_NOT_FOUND,    /* 401/403/404/410: منبع وجود ندارد یا دسترسی ندارد */
+    DASH_ERR_NOT_FOUND,    /* 400/401/404/410: منبع وجود ندارد یا دسترسی ندارد */
     DASH_ERR_PARSE,        /* manifest یا segment معتبر نیست */
     DASH_ERR_UNSUPPORTED,  /* live، DRM، SegmentTimeline و موارد ناپشتیبانی‌شده */
     DASH_ERR_IO,           /* کانتینر یا فایل خروجی */

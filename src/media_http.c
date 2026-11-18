@@ -17,11 +17,17 @@
 /* نتیجه‌ی یک GET خام؛ جزئیات برای تصمیم تلاش مجدد */
 typedef enum {
     ONCE_OK = 0,
-    ONCE_NETWORK,         /* خطای شبکه یا HTTP؛ *status کد HTTP یا ۰ */
-    ONCE_RANGE_IGNORED,   /* سرور Range را نادیده گرفت (200 به‌جای 206) */
-    ONCE_TOO_LARGE,       /* بدنه از سقف بزرگ‌تر است یا حافظه کم است */
+    ONCE_NETWORK,        /* خطای شبکه یا HTTP؛ *status کد HTTP یا ۰ */
+    ONCE_RANGE_IGNORED,  /* سرور Range را نادیده گرفت (200 به‌جای 206) */
+    ONCE_TOO_LARGE,      /* بدنه از سقف بزرگ‌تر است یا حافظه کم است */
     ONCE_STOPPED
 } OnceResult;
+
+/* همان قاعدهٔ http.c (discovery) و engine.c: فقط این چهار کد دائمی‌اند.
+   403 و 408 و 429 و 5xx موقتی‌اند، چون ممکن است محدودیت نرخ یا خطای گذرا باشند. */
+static BOOL status_is_permanent(int st) {
+    return st == 400 || st == 401 || st == 404 || st == 410;
+}
 
 void media_buf_free(MediaBuf *b) {
     free(b->data);
@@ -59,6 +65,21 @@ BOOL media_sleep_checked(const MediaHttp *h, uint32_t ms) {
         left -= step;
     }
     return !media_stopped(h);
+}
+
+uint32_t media_retry_wait_ms(uint32_t attempt, uint32_t retry_after_sec) {
+    uint32_t sec;
+    if (retry_after_sec > 0u) {
+        sec = retry_after_sec;
+    } else if (attempt == 0u) {
+        sec = 1u;
+    } else if (attempt <= 6u) {
+        sec = 1u << (attempt - 1u);
+    } else {
+        sec = MEDIA_RETRY_CAP_SEC;
+    }
+    if (sec > MEDIA_RETRY_CAP_SEC) sec = MEDIA_RETRY_CAP_SEC;
+    return sec * 1000u;
 }
 
 /* یک GET؛ بدنه در out. کد جزئی: *status ۰ شبکه، -1 Range نادیده، -2 بزرگ‌تر از سقف */
@@ -143,21 +164,12 @@ MediaResult media_fetch(const MediaHttp *h, const char *url, uint64_t start, uin
             snprintf(err, err_sz, "%s is larger than the supported size", what);
             return MEDIA_FAILED;
         }
-        if (st == 401 || st == 403 || st == 404 || st == 410) {
+        if (status_is_permanent(st)) {
             snprintf(err, err_sz, "%s: HTTP %d", what, st);
             return MEDIA_NOT_FOUND;
         }
-        if (st >= 400 && st < 500 && st != 408 && st != 429) {
-            snprintf(err, err_sz, "%s: HTTP %d", what, st);
-            return MEDIA_FAILED;
-        }
         if (a == attempts) break;
-        {
-            uint32_t wait_s = (ra > 0)
-                ? (ra > MEDIA_RETRY_CAP_SEC ? MEDIA_RETRY_CAP_SEC : ra)
-                : (1u << (a - 1u));
-            if (!media_sleep_checked(h, wait_s * 1000u)) return MEDIA_STOPPED;
-        }
+        if (!media_sleep_checked(h, media_retry_wait_ms(a, ra))) return MEDIA_STOPPED;
     }
     if (last > 0)
         snprintf(err, err_sz, "%s: HTTP %d after %u attempts", what, last, (unsigned)attempts);

@@ -21,7 +21,7 @@ struct IDM_Download;
 typedef enum {
     HLS_OK = 0,
     HLS_ERR_FETCH,        /* خطای شبکه یا HTTP که بعد از تلاش‌های مجدد هم رفع نشد */
-    HLS_ERR_NOT_FOUND,    /* 401/403/404/410: منبع وجود ندارد یا دسترسی ندارد */
+    HLS_ERR_NOT_FOUND,    /* 400/401/404/410: منبع وجود ندارد یا دسترسی ندارد */
     HLS_ERR_PARSE,        /* playlist معتبر HLS نیست */
     HLS_ERR_UNSUPPORTED,  /* live، DRM، صدای جدا و موارد ناپشتیبانی‌شده‌ی دیگر */
     HLS_ERR_CRYPTO,       /* رمزگشایی ناموفق (کلید یا داده‌ی خراب) */

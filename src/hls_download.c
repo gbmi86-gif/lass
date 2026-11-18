@@ -107,7 +107,7 @@ static void report(const HlsRun *run, uint64_t bytes, uint32_t done, uint32_t to
    ====================================================== */
 
 
-/* 429/503 با Retry-After، خطای شبکه با ۱ و ۲ و ۴ ثانیه؛ 401/403/404/410 دائمی‌اند */
+/* 429/503 با Retry-After، خطای شبکه با ۱ و ۲ و ۴ ثانیه؛ 400/401/404/410 دائمی‌اند */
 static HlsStatus fetch_retry(HlsRun *run, const char *url, uint64_t start, uint64_t end,
                              uint64_t max_len, BOOL need_partial, uint32_t attempts,
                              HlsBuf *out, const char *what) {

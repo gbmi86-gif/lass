@@ -19,6 +19,8 @@ typedef struct {
     uint32_t       len;
     int            fail_status;   /* 0 یعنی بدون خطا */
     int            fail_left;     /* -1 یعنی همیشه؛ 0 یعنی تمام؛ وگرنه باقی‌مانده */
+    int            fail_retry_after; /* Retry-After همراه خطا؛ 0 یعنی ندارد */
+    BOOL           ignore_range;     /* TRUE: Range را نادیده بگیر و 200 کامل بده */
     int            hits;
 } HlsTsRoute;
 
@@ -73,6 +75,7 @@ void hls_test_server_clear_fail(const char *path) {
     if (r) {
         r->fail_status = 0;
         r->fail_left = 0;
+        r->fail_retry_after = 0;
     }
     LeaveCriticalSection(&g_lock);
 }
@@ -168,6 +171,7 @@ static void handle_conn(SOCKET cs) {
     const uint8_t *body = err_body;
     uint32_t blen = (uint32_t)(sizeof(err_body) - 1);
     unsigned long long cr_start = 0, cr_end = 0, total = 0;
+    int retry_after = 0;
     BOOL partial = FALSE;
 
     EnterCriticalSection(&g_lock);
@@ -176,13 +180,14 @@ static void handle_conn(SOCKET cs) {
         r->hits++;
         if (r->fail_status != 0 && r->fail_left != 0) {
             status = r->fail_status;
+            retry_after = r->fail_retry_after;
             if (r->fail_left > 0) r->fail_left--;
         } else if (r->body) {
             status = 200;
             body = r->body;
             blen = r->len;
             total = r->len;
-            if (has_range) {
+            if (has_range && !r->ignore_range) {
                 if (total == 0 || rs >= total || (has_end && re < rs)) {
                     status = 416;
                     body = err_body;
@@ -210,6 +215,8 @@ static void handle_conn(SOCKET cs) {
                       cr_start, cr_end, total);
     else
         hl = snprintf(head, sizeof(head), "HTTP/1.1 %d %s\r\n", status, reason_of(status));
+    if (retry_after > 0)
+        hl += snprintf(head + hl, sizeof(head) - (size_t)hl, "Retry-After: %d\r\n", retry_after);
     hl += snprintf(head + hl, sizeof(head) - (size_t)hl,
                    "Content-Length: %u\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
                    (unsigned int)blen);
@@ -277,4 +284,22 @@ void hls_test_server_stop(void) {
         CloseHandle(g_thread);
         g_thread = NULL;
     }
+}
+
+void hls_test_server_fail_retry_after(const char *path, int status, int times, int retry_after_sec) {
+    EnterCriticalSection(&g_lock);
+    HlsTsRoute *r = route_find(path, TRUE);
+    if (r) {
+        r->fail_status = status;
+        r->fail_left = times > 0 ? times : -1;
+        r->fail_retry_after = retry_after_sec > 0 ? retry_after_sec : 0;
+    }
+    LeaveCriticalSection(&g_lock);
+}
+
+void hls_test_server_ignore_range(const char *path) {
+    EnterCriticalSection(&g_lock);
+    HlsTsRoute *r = route_find(path, TRUE);
+    if (r) r->ignore_range = TRUE;
+    LeaveCriticalSection(&g_lock);
 }
