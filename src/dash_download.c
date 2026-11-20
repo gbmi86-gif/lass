@@ -19,6 +19,7 @@
 #include "dash_download.h"
 #include "http.h"
 #include "media_http.h"
+#include "media_store.h"
 #include "tels_container.h"
 #include "lass_log.h"
 #include "mp4_mux.h"
@@ -38,7 +39,6 @@
 #define DASH_META_NAME      "dash.meta"
 #define DASH_META_HEAD      "lass-dash 1\n"
 #define DASH_FNV_BASIS      1469598103934665603ULL
-#define DASH_FNV_PRIME      1099511628211ULL
 
 /* ======================================================
    بافر و کمک‌های عمومی
@@ -58,15 +58,6 @@ static MediaHttp dash_http(const DashRun *run) {
 static BOOL run_stop(const DashRun *run) {
     MediaHttp h = dash_http(run);
     return media_stopped(&h);
-}
-
-static BOOL sleep_checked(const DashRun *run, uint32_t ms) {
-    MediaHttp h = dash_http(run);
-    return media_sleep_checked(&h, ms);
-}
-
-static BOOL buf_reserve(DashBuf *b, uint64_t need, uint64_t max) {
-    return media_buf_reserve(b, need, max);
 }
 
 static void buf_free(DashBuf *b) {
@@ -115,98 +106,67 @@ static DashStatus fetch_retry(DashRun *run, const char *url, uint64_t max_len,
 
 
 
-/* ======================================================
-   کانتینر موقت
-   ====================================================== */
 static TelsId entry_find(TelsContainer *c, const char *name) {
-    TelsId id = 0;
-    return tels_lookup(c, TELS_ROOT, name, &id) ? id : 0;
+    return media_entry_find(c, name);
 }
 
 static BOOL entry_exists(TelsContainer *c, const char *name) {
-    return entry_find(c, name) != 0;
+    return media_entry_exists(c, name);
 }
 
 static BOOL entry_size_of_name(TelsContainer *c, const char *name, uint64_t *sz) {
-    TelsId id = entry_find(c, name);
-    return id != 0 && tels_size(c, id, sz);
+    return media_entry_size(c, name, sz);
 }
 
-static BOOL entry_drop(TelsContainer *c, const char *name) {
-    TelsId id = entry_find(c, name);
-    return id ? tels_delete(c, id) : TRUE;
-}
-
-/* جایگزین کامل یک entry؛ اول نسخه‌ی قبلی حذف، بعد نوشتن در تکه‌ها */
 static BOOL entry_put(TelsContainer *c, const char *name, const uint8_t *data, uint64_t len) {
-    TelsId id = 0;
-    uint64_t off = 0;
-    if (!entry_drop(c, name)) return FALSE;
-    if (!tels_create(c, TELS_ROOT, name, TELS_TYPE_FILE, &id)) return FALSE;
-    while (off < len) {
-        uint64_t left = len - off;
-        uint32_t n = left > DASH_IO_CHUNK ? DASH_IO_CHUNK : (uint32_t)left;
-        if (!tels_write(c, id, off, data + off, n)) return FALSE;
-        off += n;
-    }
-    return TRUE;
+    return media_entry_put(c, name, data, len, DASH_IO_CHUNK);
 }
 
-/* نشانه‌ی کامل بودن: entry صفر بایتی */
 static BOOL entry_marker(TelsContainer *c, const char *name) {
-    TelsId id = 0;
-    if (!entry_drop(c, name)) return FALSE;
-    return tels_create(c, TELS_ROOT, name, TELS_TYPE_FILE, &id);
+    return media_entry_marker(c, name);
 }
 
 static BOOL container_clear(TelsContainer *c) {
-    uint32_t n = tels_list(c, TELS_ROOT, NULL, 0);
-    TelsId *ids;
-    BOOL ok = TRUE;
-    uint32_t i;
-    if (n == 0) return TRUE;
-    ids = (TelsId *)malloc(sizeof(TelsId) * n);
-    if (!ids) return FALSE;
-    n = tels_list(c, TELS_ROOT, ids, n);
-    for (i = 0; i < n; i++) ok = tels_delete(c, ids[i]) && ok;
-    free(ids);
-    return ok;
+    return media_container_clear(c);
 }
 
-/* داده‌ی کامل یک entry در بافر؛ سقف max_len */
 static BOOL read_entry(TelsContainer *c, const char *name, DashBuf *out, uint64_t max_len) {
-    TelsId id = entry_find(c, name);
-    uint64_t size = 0, off = 0;
-    out->len = 0;
-    if (!id || !tels_size(c, id, &size)) return FALSE;
-    if (size > max_len || !buf_reserve(out, size, max_len)) return FALSE;
-    while (off < size) {
-        uint64_t left = size - off;
-        uint32_t want = left > DASH_IO_CHUNK ? DASH_IO_CHUNK : (uint32_t)left;
-        if (tels_read(c, id, off, out->data + off, want) != (int32_t)want) return FALSE;
-        off += want;
-    }
-    out->len = size;
-    return TRUE;
+    return media_entry_read(c, name, out, max_len);
 }
 
 static void finish_container(TelsContainer *c) {
-    if (c) {
-        tels_commit(c);
-        tels_close(c);
-    }
+    media_container_finish(c);
 }
 
-/* کانتینر ممکن است هنوز در اجرای قبلی (در حال pause) باز باشد؛ چند بار تلاش */
 static TelsContainer *open_container(DashRun *run) {
-    uint32_t t;
-    for (t = 0; t < DASH_BUSY_TRIES; t++) {
-        TelsContainer *c = tels_open(run->temp_path, TRUE);
-        if (c) return c;
-        if (!sleep_checked(run, 1000u)) return NULL;
-    }
-    return NULL;
+    MediaHttp h = dash_http(run);
+    return media_container_open(run->temp_path, DASH_BUSY_TRIES, &h);
 }
+
+static const char *const DASH_FINAL_STRIP[] = { ".mpd", ".mp4", ".m4s", ".m4v", ".ts" };
+
+static void choose_final_path(const char *out_path, char *out, size_t sz) {
+    media_choose_final_path(out_path, ".mp4", DASH_FINAL_STRIP,
+                            sizeof(DASH_FINAL_STRIP) / sizeof(DASH_FINAL_STRIP[0]), out, sz);
+}
+
+static uint64_t fnv_mix(uint64_t h, const void *p, size_t n) {
+    return media_fnv_mix(h, p, n);
+}
+
+static void strip_query(const char *url, char *out, size_t sz) {
+    media_strip_query(url, out, sz);
+}
+
+
+
+
+
+
+
+
+
+
 
 static void src_names(char tag, uint32_t i, char sn[16], char dn[16]) {
     snprintf(sn, 16, "%c%06u", tag, (unsigned)i);
@@ -251,74 +211,10 @@ static BOOL meta_load(TelsContainer *c, uint64_t *fp, char *final_name, size_t f
     return meta_parse(text, fp, final_name, fn_sz);
 }
 
-/* ======================================================
-   نام نهایی: پسوند منبع کنار گذاشته، پسوند mp4؛ اگر مشغول بود عدد می‌گیرد
-   ====================================================== */
-static BOOL path_exists(const char *p) {
-    return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
-}
 
-static BOOL build_candidate(char *out, size_t sz, const char *stem, int n) {
-    char num[16];
-    size_t sl, nl, el;
-    num[0] = '\0';
-    if (n > 0) snprintf(num, sizeof(num), " (%d)", n);
-    sl = strlen(stem);
-    nl = strlen(num);
-    el = strlen(".mp4");
-    if (sl + nl + el + 1u > sz) return FALSE;
-    memcpy(out, stem, sl);
-    memcpy(out + sl, num, nl);
-    memcpy(out + sl + nl, ".mp4", el + 1u);
-    return TRUE;
-}
 
-static void choose_final_path(const char *out_path, char *out, size_t sz) {
-    char stem[IDM_MAX_PATH];
-    char *dot, *sep, *sep2;
-    size_t room;
-    int n;
-    str_copy(stem, sizeof(stem), out_path);
-    dot = strrchr(stem, '.');
-    sep = strrchr(stem, '\\');
-    sep2 = strrchr(stem, '/');
-    if (sep2 && (!sep || sep2 > sep)) sep = sep2;
-    if (dot && (!sep || dot > sep)) {
-        if (_stricmp(dot, ".mpd") == 0 || _stricmp(dot, ".mp4") == 0 ||
-            _stricmp(dot, ".m4s") == 0 || _stricmp(dot, ".m4v") == 0 ||
-            _stricmp(dot, ".ts") == 0)
-            *dot = '\0';
-    }
-    room = sz > 32u ? sz - 32u : 0u;
-    if (strlen(stem) > room) stem[room] = '\0';
-    for (n = 0; n < 1000; n++) {
-        if (build_candidate(out, sz, stem, n) && !path_exists(out)) return;
-    }
-    build_candidate(out, sz, stem, 0);
-}
 
-/* ======================================================
-   fingerprint: هویت یک دانلود از روی representation ها و آدرس‌ها (بدون query)
-   ====================================================== */
-static uint64_t fnv_mix(uint64_t h, const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    size_t i;
-    for (i = 0; i < n; i++) {
-        h ^= b[i];
-        h *= DASH_FNV_PRIME;
-    }
-    return h;
-}
 
-static void strip_query(const char *url, char *out, size_t sz) {
-    size_t n = 0;
-    if (sz == 0) return;
-    while (url[n] && url[n] != '?' && n + 1 < sz) {
-        out[n] = url[n];
-        n++;
-    }
-    out[n] = '\0';
-}
 
 typedef struct {
     const DASH_Representation *rep;

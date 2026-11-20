@@ -26,6 +26,7 @@
 #include "hls_download.h"
 #include "http.h"
 #include "media_http.h"
+#include "media_store.h"
 #include "tels_container.h"
 #include "lass_log.h"
 #include "../plugins/plugin_hls.h"
@@ -82,11 +83,6 @@ static MediaHttp hls_http(const HlsRun *run) {
 static BOOL run_stop(const HlsRun *run) {
     MediaHttp h = hls_http(run);
     return media_stopped(&h);
-}
-
-static BOOL sleep_checked(const HlsRun *run, uint32_t ms) {
-    MediaHttp h = hls_http(run);
-    return media_sleep_checked(&h, ms);
 }
 
 static void buf_free(HlsBuf *b) {
@@ -228,26 +224,59 @@ static HlsStatus aes128_cbc_decrypt(HlsRun *run, const uint8_t key[HLS_KEY_LEN],
     return st;
 }
 
-/* ======================================================
-   اثر انگشت playlist و نام‌های کانتینر
-   ====================================================== */
-static uint64_t fnv_mix(uint64_t h, const void *p, size_t n) {
-    const uint8_t *b = (const uint8_t *)p;
-    for (size_t i = 0; i < n; i++) {
-        h ^= b[i];
-        h *= 1099511628211ULL;
-    }
-    return h;
+static TelsId entry_find(TelsContainer *c, const char *name) {
+    return media_entry_find(c, name);
 }
 
-/* بدون query: توکن‌های امضاشده‌ی URL در هر بار دریافت عوض می‌شوند */
-static void strip_query(const char *url, char *out, size_t sz) {
-    const char *q = strchr(url, '?');
-    size_t n = q ? (size_t)(q - url) : strlen(url);
-    if (n >= sz) n = sz - 1u;
-    memcpy(out, url, n);
-    out[n] = '\0';
+static BOOL entry_exists(TelsContainer *c, const char *name) {
+    return media_entry_exists(c, name);
 }
+
+static BOOL entry_size_of(TelsContainer *c, const char *name, uint64_t *sz) {
+    return media_entry_size(c, name, sz);
+}
+
+static BOOL entry_put(TelsContainer *c, const char *name, const uint8_t *data, uint64_t len) {
+    return media_entry_put(c, name, data, len, HLS_IO_CHUNK);
+}
+
+static BOOL entry_marker(TelsContainer *c, const char *name) {
+    return media_entry_marker(c, name);
+}
+
+static BOOL container_clear(TelsContainer *c) {
+    return media_container_clear(c);
+}
+
+static BOOL copy_entry(TelsContainer *c, HANDLE h, const char *name, uint8_t *buf) {
+    return media_entry_copy_to_handle(c, name, h, buf, HLS_CONCAT_CHUNK);
+}
+
+static void finish_container(TelsContainer *c) {
+    media_container_finish(c);
+}
+
+static TelsContainer *open_container(HlsRun *run) {
+    MediaHttp h = hls_http(run);
+    return media_container_open(run->temp_path, HLS_BUSY_TRIES, &h);
+}
+
+static const char *const HLS_FINAL_STRIP[] = { ".m3u8", ".m3u", ".ts", ".mp4", ".m4s", ".m4v" };
+
+static void choose_final_path(const char *out_path, BOOL has_map, char *out, size_t sz) {
+    media_choose_final_path(out_path, has_map ? ".mp4" : ".ts", HLS_FINAL_STRIP,
+                            sizeof(HLS_FINAL_STRIP) / sizeof(HLS_FINAL_STRIP[0]), out, sz);
+}
+
+static uint64_t fnv_mix(uint64_t h, const void *p, size_t n) {
+    return media_fnv_mix(h, p, n);
+}
+
+static void strip_query(const char *url, char *out, size_t sz) {
+    media_strip_query(url, out, sz);
+}
+
+
 
 /* اثر انگشت: شماره‌ی توالی، مسیر بدون query، مدت، و بازه‌های بایت هر segment */
 static uint64_t playlist_fingerprint(const HLS_Playlist *pl) {
@@ -278,51 +307,8 @@ static void map_names(int m, char mn[16], char mk[16]) {
     snprintf(mk, 16, "mk%02d", m);
 }
 
-static BOOL path_exists(const char *p) {
-    return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
-}
 
-/* نام نهایی: پسوند playlist کنار گذاشته می‌شود؛ با EXT-X-MAP پسوند mp4، وگرنه ts؛
-   اگر نام مشغول باشد عدد می‌گیرد: "name (1).ts" */
-/* out = stem + ext، یا stem + " (n)" + ext. TRUE اگر در sz جا شد.
-   stem قبلاً کوتاه شده است تا همیشه جا شود. */
-static BOOL build_candidate(char *out, size_t sz, const char *stem, int n, const char *ext) {
-    char num[16];
-    num[0] = '\0';
-    if (n > 0) snprintf(num, sizeof(num), " (%d)", n);
-    size_t sl = strlen(stem), nl = strlen(num), el = strlen(ext);
-    if (sl + nl + el + 1u > sz) return FALSE;
-    memcpy(out, stem, sl);
-    memcpy(out + sl, num, nl);
-    memcpy(out + sl + nl, ext, el + 1u);
-    return TRUE;
-}
 
-/* نام نهایی: پسوند playlist کنار گذاشته می‌شود؛ با EXT-X-MAP پسوند mp4، وگرنه ts؛
-   اگر نام مشغول باشد عدد می‌گیرد: "name (1).ts" */
-static void choose_final_path(const char *out_path, BOOL has_map, char *out, size_t sz) {
-    char stem[IDM_MAX_PATH];
-    str_copy(stem, sizeof(stem), out_path);
-    const char *ext = has_map ? ".mp4" : ".ts";
-    char *dot = strrchr(stem, '.');
-    char *sep = strrchr(stem, '\\');
-    char *sep2 = strrchr(stem, '/');
-    if (sep2 && (!sep || sep2 > sep)) sep = sep2;
-    if (dot && (!sep || dot > sep)) {
-        if (_stricmp(dot, ".m3u8") == 0 || _stricmp(dot, ".m3u") == 0 ||
-            _stricmp(dot, ".ts") == 0 || _stricmp(dot, ".mp4") == 0 ||
-            _stricmp(dot, ".m4s") == 0 || _stricmp(dot, ".m4v") == 0)
-            *dot = '\0';
-    }
-    /* جای پسوند و شماره‌ی " (999)" باید باقی بماند */
-    size_t room = sz > 32u ? sz - 32u : 0u;
-    if (strlen(stem) > room) stem[room] = '\0';
-    for (int n = 0; n < 1000; n++) {
-        build_candidate(out, sz, stem, n, ext);
-        if (!path_exists(out)) return;
-    }
-    build_candidate(out, sz, stem, 0, ext);
-}
 
 /* متن hls.meta — سه خط با پیشوند ثابت */
 static int meta_format(char *buf, size_t sz, uint64_t fp, uint32_t segs, const char *final_name) {
@@ -348,78 +334,13 @@ static BOOL meta_parse(const char *text, uint64_t *fp, uint32_t *segs,
     return TRUE;
 }
 
-/* ======================================================
-   کانتینر موقت
-   ====================================================== */
-static TelsId entry_find(TelsContainer *c, const char *name) {
-    TelsId id = 0;
-    return tels_lookup(c, TELS_ROOT, name, &id) ? id : 0;
-}
 
-static BOOL entry_exists(TelsContainer *c, const char *name) {
-    return entry_find(c, name) != 0;
-}
 
-static BOOL entry_size_of(TelsContainer *c, const char *name, uint64_t *sz) {
-    TelsId id = entry_find(c, name);
-    return id != 0 && tels_size(c, id, sz);
-}
 
-static BOOL entry_drop(TelsContainer *c, const char *name) {
-    TelsId id = entry_find(c, name);
-    return id ? tels_delete(c, id) : TRUE;
-}
 
-/* جایگزین کردن کامل یک entry؛ اول حذف نسخه‌ی قبلی، بعد نوشتن در تکه‌های بزرگ */
-static BOOL entry_put(TelsContainer *c, const char *name, const uint8_t *data, uint64_t len) {
-    if (!entry_drop(c, name)) return FALSE;
-    TelsId id = 0;
-    if (!tels_create(c, TELS_ROOT, name, TELS_TYPE_FILE, &id)) return FALSE;
-    for (uint64_t off = 0; off < len; ) {
-        uint64_t left = len - off;
-        uint32_t n = left > HLS_IO_CHUNK ? HLS_IO_CHUNK : (uint32_t)left;
-        if (!tels_write(c, id, off, data + off, n)) return FALSE;
-        off += n;
-    }
-    return TRUE;
-}
 
-/* نشانه‌ی کامل بودن: entry صفر بایتی */
-static BOOL entry_marker(TelsContainer *c, const char *name) {
-    if (!entry_drop(c, name)) return FALSE;
-    TelsId id = 0;
-    return tels_create(c, TELS_ROOT, name, TELS_TYPE_FILE, &id);
-}
 
-/* همه‌ی entry های کانتینر را حذف می‌کند (وقتی playlist عوض شده) */
-static BOOL container_clear(TelsContainer *c) {
-    uint32_t n = tels_list(c, TELS_ROOT, NULL, 0);
-    if (n == 0) return TRUE;
-    TelsId *ids = (TelsId *)malloc(sizeof(TelsId) * n);
-    if (!ids) return FALSE;
-    n = tels_list(c, TELS_ROOT, ids, n);
-    BOOL ok = TRUE;
-    for (uint32_t i = 0; i < n; i++)
-        ok = tels_delete(c, ids[i]) && ok;
-    free(ids);
-    return ok;
-}
 
-/* داده‌ی entry را به فایل باز شده می‌نویسد */
-static BOOL copy_entry(TelsContainer *c, HANDLE h, const char *name, uint8_t *buf) {
-    TelsId id = entry_find(c, name);
-    uint64_t size = 0;
-    if (!id || !tels_size(c, id, &size)) return FALSE;
-    for (uint64_t off = 0; off < size; ) {
-        uint64_t left = size - off;
-        uint32_t want = left > HLS_CONCAT_CHUNK ? HLS_CONCAT_CHUNK : (uint32_t)left;
-        if (tels_read(c, id, off, buf, want) != (int32_t)want) return FALSE;
-        DWORD w = 0;
-        if (!WriteFile(h, buf, want, &w, NULL) || w != want) return FALSE;
-        off += want;
-    }
-    return TRUE;
-}
 
 /* hls.meta از کانتینر؛ اگر نباشد یا خراب باشد FALSE */
 static BOOL meta_load(TelsContainer *c, uint64_t *fp, uint32_t *segs,
@@ -433,22 +354,7 @@ static BOOL meta_load(TelsContainer *c, uint64_t *fp, uint32_t *segs,
     return meta_parse(text, fp, segs, final_name, fn_sz);
 }
 
-static void finish_container(TelsContainer *c) {
-    if (c) {
-        tels_commit(c);
-        tels_close(c);
-    }
-}
 
-/* کانتینر ممکن است هنوز توسط اجرای قبلی (در حال pause) باز باشد؛ چند بار تلاش می‌کنیم */
-static TelsContainer *open_container(HlsRun *run) {
-    for (uint32_t t = 0; t < HLS_BUSY_TRIES; t++) {
-        TelsContainer *c = tels_open(run->temp_path, TRUE);
-        if (c) return c;
-        if (!sleep_checked(run, 1000u)) return NULL;
-    }
-    return NULL;
-}
 
 /* ======================================================
    playlist: گرفتن، انتخاب variant، و کنترل پشتیبانی

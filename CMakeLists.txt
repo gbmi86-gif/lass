@@ -13,7 +13,7 @@ add_compile_options(-Wall -Wextra -DWIN32 -D_WIN32 -DWIN32_LEAN_AND_MEAN)
 add_compile_definitions($<$<CONFIG:Debug>:IDM_DEBUG>)
 
 set(SRC_FILES
-    src/engine.c src/segment.c src/http.c src/hls_download.c src/dash_download.c src/mp4_mux.c src/media_http.c
+    src/engine.c src/segment.c src/http.c src/hls_download.c src/dash_download.c src/mp4_mux.c src/media_http.c src/media_store.c
     src/storage.c src/resume.c src/settings.c src/queue_persist.c
     src/lass_log.c
     src/secure_store.c
@@ -67,7 +67,7 @@ target_link_libraries(Lass PRIVATE idm_lib ws2_32 bcrypt crypt32
 target_link_options(Lass PRIVATE -static)
 
 enable_testing()
-add_executable(test_all tests/test_all.c tests/test_common.c tests/test_core.c tests/test_engine.c tests/test_network.c tests/test_storage.c tests/test_system.c tests/test_browser.c tests/test_hls.c tests/test_dash.c tests/test_media.c tests/test_httpd.c tests/test_ftpd.c tests/test_hls_server.c)
+add_executable(test_all tests/test_all.c tests/test_common.c tests/test_core.c tests/test_engine.c tests/test_network.c tests/test_storage.c tests/test_system.c tests/test_browser.c tests/test_hls.c tests/test_dash.c tests/test_media.c tests/test_media_store.c tests/test_httpd.c tests/test_ftpd.c tests/test_hls_server.c)
 target_link_libraries(test_all PRIVATE idm_lib wininet ws2_32 comctl32 comdlg32 shell32 user32 gdi32 ole32 uuid shlwapi bcrypt crypt32)
 target_include_directories(test_all PUBLIC src plugins core)
 add_test(NAME full_test COMMAND test_all)
