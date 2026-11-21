@@ -189,3 +189,47 @@ void media_strip_query(const char *url, char *out, size_t sz) {
     }
     out[n] = '\0';
 }
+
+int media_meta_format(char *buf, size_t sz, const char *head, uint64_t fp,
+                      BOOL has_segs, uint32_t segs, const char *final_name) {
+    int n;
+    if (has_segs)
+        n = snprintf(buf, sz, "%sfp=%016llx\nsegments=%u\nfinal=%s\n", head,
+                     (unsigned long long)fp, (unsigned)segs, final_name);
+    else
+        n = snprintf(buf, sz, "%sfp=%016llx\nfinal=%s\n", head,
+                     (unsigned long long)fp, final_name);
+    if (n < 0 || (size_t)n >= sz) return -1;
+    return n;
+}
+
+BOOL media_meta_parse(const char *text, const char *head, BOOL has_segs,
+                      uint64_t *fp, uint32_t *segs, char *final_name, size_t fn_sz) {
+    const char *f, *s = NULL, *n, *nb, *ne;
+    size_t nl;
+    if (strncmp(text, head, strlen(head)) != 0) return FALSE;
+    f = strstr(text, "\nfp=");
+    n = strstr(text, "\nfinal=");
+    if (has_segs) s = strstr(text, "\nsegments=");
+    if (!f || !n || (has_segs && !s)) return FALSE;
+    *fp = (uint64_t)strtoull(f + 4, NULL, 16);
+    if (has_segs) *segs = (uint32_t)strtoul(s + 10, NULL, 10);
+    nb = n + 7;
+    ne = strchr(nb, '\n');
+    nl = ne ? (size_t)(ne - nb) : strlen(nb);
+    if (nl == 0 || nl >= fn_sz) return FALSE;
+    memcpy(final_name, nb, nl);
+    final_name[nl] = '\0';
+    return TRUE;
+}
+
+BOOL media_meta_load(TelsContainer *c, const char *name, const char *head, BOOL has_segs,
+                     uint64_t *fp, uint32_t *segs, char *final_name, size_t fn_sz) {
+    TelsId id = media_entry_find(c, name);
+    uint64_t sz = 0;
+    char text[1025];
+    if (!id || !tels_size(c, id, &sz) || sz == 0 || sz > 1024u) return FALSE;
+    if (tels_read(c, id, 0, text, (uint32_t)sz) != (int32_t)sz) return FALSE;
+    text[sz] = '\0';
+    return media_meta_parse(text, head, has_segs, fp, segs, final_name, fn_sz);
+}

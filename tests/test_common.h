@@ -194,4 +194,6 @@ BOOL test_read_file(const char *path, uint8_t **out, size_t *len);
 void test_sweep_stale_state(void);
 void test_media_http(void);
 void test_media_store(void);
+void test_hls_container_resume(void);
+void test_dash_container_resume(void);
 #endif /* LASS_TEST_COMMON_H */

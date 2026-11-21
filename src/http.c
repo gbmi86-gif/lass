@@ -315,16 +315,18 @@ IDM_Result http_discover(const char *url, const char *referer,
     if (!HttpSendRequestA(hReq, NULL, 0, NULL, 0)) {
         /* حیاتی برای دیباگ آینده: بدون این لاگ، هیچ‌وقت نمی‌فهمیم
            آیا شکست واقعاً به‌خاطر مشکل شبکه بوده یا صف WinINet.
-           ERROR_INTERNET_TIMEOUT (12002) یا
-           ERROR_INTERNET_CANNOT_CONNECT (12029) نشونه‌ی
-           تایم‌اوت/صف هستن؛ کدهای دیگه معمولاً مشکل واقعی شبکه‌ان. */
+             ERROR_INTERNET_TIMEOUT (12002) یعنی سرور یا صف WinINet جواب نداد؛
+             ERROR_INTERNET_CANNOT_CONNECT (12029) یعنی اتصال رد یا فیلتر شد؛
+             بقیه‌ی کدها را همان‌طور که هستند نشان می‌دهیم. */
         DWORD err = GetLastError();
         LOGE(LOG_MOD_HTTP,
              "HttpSendRequestA failed for %s%s (err=%lu%s)",
              pu.host, pu.path, (unsigned long)err,
-             (err == ERROR_INTERNET_TIMEOUT || err == ERROR_INTERNET_CANNOT_CONNECT)
-                 ? " — likely WinINet per-server connection queue/timeout"
-                 : "");
+               (err == ERROR_INTERNET_TIMEOUT)
+                   ? " — timed out: the server or the WinINet connection queue did not answer"
+                   : (err == ERROR_INTERNET_CANNOT_CONNECT)
+                   ? " — cannot connect: refused, or blocked by a firewall or filter"
+                   : "");
         result = IDM_ERR_NETWORK;
         goto cleanup;
     }

@@ -1,5 +1,6 @@
 /* dash: DASH tests (tests/test_dash.c) */
 #include "test_common.h"
+#include "media_store.h"
 
 /* ======================================================
    تست ۱۸: DASH / MPD Plugin
@@ -655,3 +656,171 @@ void test_dash_media(void) {
     }
 }
 
+
+/* ======================================================
+   resume روی سطح کانتینر (DASH): نشانه‌ی گم‌شده، manifest عوض‌شده،
+   و رکورد resume خراب باید هر کدام درست بازیابی شوند
+   ====================================================== */
+#define DR_PORT 18491
+#define DR_BASE "http://127.0.0.1:18491"
+
+static const char *const DR_MARK[6] = { "vd000000", "vd000001", "vd000002",
+                                        "ad000000", "ad000001", "ad000002" };
+static const char *const DR_URL[6]  = { "/v-1.m4s", "/v-2.m4s", "/v-3.m4s",
+                                        "/a-1.m4s", "/a-2.m4s", "/a-3.m4s" };
+
+static DashRun dr_run(const char *tmp, const char *out, DtStop *stop) {
+    DashRun r;
+    memset(&r, 0, sizeof(r));
+    r.url = DR_BASE "/manifest.mpd";
+    r.temp_path = tmp;
+    r.out_path = out;
+    r.should_stop = dt_should_stop;
+    r.stop_ctx = stop;
+    r.on_progress = dt_progress;
+    r.progress_ctx = stop;
+    return r;
+}
+
+static BOOL dr_marker(const char *tmp, const char *name) {
+    TelsContainer *c = tels_open(tmp, FALSE);
+    BOOL ok;
+    if (!c) return FALSE;
+    ok = media_entry_exists(c, name);
+    tels_close(c);
+    return ok;
+}
+
+static BOOL dr_edit(const char *tmp, const char *name, const uint8_t *data, uint64_t len, BOOL drop) {
+    TelsContainer *c = tels_open(tmp, FALSE);
+    BOOL ok = FALSE;
+    if (!c) return FALSE;
+    ok = drop ? media_entry_drop(c, name) : media_entry_put(c, name, data, len, 4096u);
+    ok = ok && tels_commit(c);
+    tels_close(c);
+    return ok;
+}
+
+/* حالت هر segment را از روی نشانه‌ها می‌خواند؛ اولین کامل‌شده را برمی‌گرداند */
+static int dr_victim(const char *tmp, BOOL *done) {
+    int i, victim = -1;
+    for (i = 0; i < 6; i++) {
+        done[i] = dr_marker(tmp, DR_MARK[i]);
+        if (done[i] && victim < 0) victim = i;
+    }
+    return victim;
+}
+
+/* هر segment ناکامل یا segment بازسازی‌شده باید یک بار دریافت شود؛ بقیه هیچ */
+static BOOL dr_hits_match(const BOOL *done, int victim) {
+    int i;
+    for (i = 0; i < 6; i++) {
+        int want = (!done[i] || i == victim) ? 1 : 0;
+        if (hls_test_server_hits(DR_URL[i]) != want) return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL dr_all_hits(int want) {
+    int i;
+    for (i = 0; i < 6; i++)
+        if (hls_test_server_hits(DR_URL[i]) != want) return FALSE;
+    return TRUE;
+}
+
+void test_dash_container_resume(void) {
+    DtBuf vi = {0}, ai = {0}, mpd = {0}, mpd_new = {0}, expected = {0};
+    DtBuf vseg[3] = {{0}, {0}, {0}};
+    DtBuf aseg[3] = {{0}, {0}, {0}};
+    BOOL done[6] = {0, 0, 0, 0, 0, 0};
+    int victim = -1;
+    uint32_t k;
+    char *p;
+    static const uint8_t junk[4] = { 'j', 'u', 'n', 'k' };
+    DtStop stop;
+    DtStop none = {0, 0};
+    DashRun a, b;
+
+    SECTION("DASH container resume: a lost marker, a changed manifest, a damaged record");
+    dt_init(&vi, 1, 1, 12800u, 512u, 0x01010000u, 1000u, 0);
+    dt_init(&ai, 2, 0, 44100u, 1024u, 0u, 500u, 1);
+    for (k = 1; k <= 3; k++) {
+        dt_segment(&vseg[k - 1], 1, 1, k, 4u, 512u);
+        dt_segment(&aseg[k - 1], 2, 0, k, 3u, 1024u);
+    }
+    dt_put(&mpd, DT_MPD_TEXT, strlen(DT_MPD_TEXT));
+    dt_put(&mpd_new, DT_MPD_TEXT, strlen(DT_MPD_TEXT));
+    /* the same manifest with another video bandwidth: same length, only one digit changes */
+    p = strstr((char *)mpd_new.d, "bandwidth=\"500000\"");
+    if (p) p[11] = '6';
+    dt_expected(&expected);
+    if (!hls_test_server_start(DR_PORT)) {
+        TEST("test server starts", FALSE);
+    } else {
+        dt_serve(&vi, &ai, vseg, aseg, &mpd);
+
+        /* 1: a finished segment loses its marker: only that segment is fetched again */
+        DeleteFileA("dash_res_1.tels");
+        DeleteFileA("dash_res_1_out.mp4");
+        hls_test_server_reset_hits();
+        stop.stop_at = 3;
+        stop.seen = 0;
+        a = dr_run("dash_res_1.tels", "dash_res_1_out.mp4", &stop);
+        TEST("the first run stops after three segments", dash_download_run(&a) == DASH_ERR_STOPPED);
+        victim = dr_victim("dash_res_1.tels", done);
+        TEST("the stopped run kept at least one finished segment", victim >= 0);
+        TEST("the marker of that segment is removed",
+             victim >= 0 && dr_edit("dash_res_1.tels", DR_MARK[victim], NULL, 0, TRUE));
+        hls_test_server_reset_hits();
+        b = dr_run("dash_res_1.tels", "dash_res_1_out.mp4", &none);
+        TEST("the resumed run completes", dash_download_run(&b) == DASH_OK);
+        TEST("only the segment without its marker is fetched again", dr_hits_match(done, victim));
+        TEST("the output holds the expected media bytes", dt_check_output(b.final_path, &expected));
+        DeleteFileA(b.final_path);
+
+        /* 2: a changed manifest starts the download over */
+        DeleteFileA("dash_res_2.tels");
+        DeleteFileA("dash_res_2_out.mp4");
+        hls_test_server_reset_hits();
+        stop.stop_at = 3;
+        stop.seen = 0;
+        a = dr_run("dash_res_2.tels", "dash_res_2_out.mp4", &stop);
+        TEST("the first run of the changed-manifest case stops", dash_download_run(&a) == DASH_ERR_STOPPED);
+        hls_test_server_set("/manifest.mpd", mpd_new.d, (uint32_t)mpd_new.n);
+        hls_test_server_reset_hits();
+        b = dr_run("dash_res_2.tels", "dash_res_2_out.mp4", &none);
+        TEST("a changed manifest: the resumed run completes", dash_download_run(&b) == DASH_OK);
+        TEST("a changed manifest starts over: every segment is fetched once", dr_all_hits(1));
+        TEST("a changed manifest: the output holds the expected media bytes", dt_check_output(b.final_path, &expected));
+        DeleteFileA(b.final_path);
+        hls_test_server_set("/manifest.mpd", mpd.d, (uint32_t)mpd.n);
+
+        /* 3: a damaged resume record (garbage in dash.meta) starts the download over */
+        DeleteFileA("dash_res_3.tels");
+        DeleteFileA("dash_res_3_out.mp4");
+        hls_test_server_reset_hits();
+        stop.stop_at = 3;
+        stop.seen = 0;
+        a = dr_run("dash_res_3.tels", "dash_res_3_out.mp4", &stop);
+        TEST("the first run of the damaged-record case stops", dash_download_run(&a) == DASH_ERR_STOPPED);
+        TEST("the resume record is damaged in place",
+             dr_edit("dash_res_3.tels", "dash.meta", junk, sizeof(junk), FALSE));
+        hls_test_server_reset_hits();
+        b = dr_run("dash_res_3.tels", "dash_res_3_out.mp4", &none);
+        TEST("a damaged record: the resumed run completes", dash_download_run(&b) == DASH_OK);
+        TEST("a damaged record starts over: every segment is fetched once", dr_all_hits(1));
+        TEST("a damaged record: the output holds the expected media bytes", dt_check_output(b.final_path, &expected));
+        DeleteFileA(b.final_path);
+
+        hls_test_server_stop();
+    }
+    dt_free(&vi);
+    dt_free(&ai);
+    dt_free(&mpd);
+    dt_free(&mpd_new);
+    dt_free(&expected);
+    for (k = 0; k < 3; k++) {
+        dt_free(&vseg[k]);
+        dt_free(&aseg[k]);
+    }
+}

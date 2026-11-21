@@ -1,5 +1,6 @@
 /* hls: HLS tests (tests/test_hls.c) */
 #include "test_common.h"
+#include "media_store.h"
 
 /* ======================================================
    تست ۱۱: HLS Plugin
@@ -602,5 +603,153 @@ void test_hls_all(void) {
     test_hls_engine();
     test_hls_engine_failure();
     hls_test_server_stop();
+    test_hls_container_resume();
 }
 
+
+/* ======================================================
+   resume روی سطح کانتینر (HLS): نشانه‌ی گم‌شده، playlist عوض‌شده،
+   و رکورد resume خراب باید هر کدام درست بازیابی شوند
+   ====================================================== */
+#define HR_PORT     18488
+#define HR_BASE     "http://127.0.0.1:18488"
+#define HR_SEGS     4u
+#define HR_SEG_LEN  20000u
+
+static uint8_t hr_body[HR_SEGS][HR_SEG_LEN];
+static uint8_t hr_want[HR_SEGS * HR_SEG_LEN];
+static const char HR_PL_OLD[] =
+    "#EXTM3U\n#EXT-X-TARGETDURATION:4\n"
+    "#EXTINF:4.0,\nq0.ts\n#EXTINF:4.0,\nq1.ts\n#EXTINF:4.0,\nq2.ts\n#EXTINF:4.0,\nq3.ts\n"
+    "#EXT-X-ENDLIST\n";
+static const char HR_PL_NEW[] =
+    "#EXTM3U\n#EXT-X-TARGETDURATION:5\n"
+    "#EXTINF:4.5,\nq0.ts\n#EXTINF:4.5,\nq1.ts\n#EXTINF:4.5,\nq2.ts\n#EXTINF:4.5,\nq3.ts\n"
+    "#EXT-X-ENDLIST\n";
+
+static void hr_setup(const char *pl, uint32_t pl_len) {
+    char path[48];
+    uint32_t i;
+    hls_test_server_set("/res/index.m3u8", (const uint8_t *)pl, pl_len);
+    for (i = 0; i < HR_SEGS; i++) {
+        snprintf(path, sizeof(path), "/res/q%u.ts", (unsigned)i);
+        hls_test_server_set(path, hr_body[i], HR_SEG_LEN);
+    }
+}
+
+static HlsRun hr_run(const char *tmp, const char *out) {
+    return hls_run_for(HR_BASE "/res/index.m3u8", tmp, out);
+}
+
+/* اولین اجرا بعد از دو segment متوقف می‌شود */
+static void hr_first_run(const char *tmp, const char *out) {
+    struct HlsTestProbe pr;
+    HlsRun a = hr_run(tmp, out);
+    memset(&pr, 0, sizeof(pr));
+    pr.stop_at = 2u;
+    pr.stop = FALSE;
+    a.should_stop = hls_test_should_stop;
+    a.stop_ctx = &pr;
+    a.on_progress = hls_test_progress;
+    a.progress_ctx = &pr;
+    TEST("the first run stops after two segments", hls_download_run(&a) == HLS_ERR_STOPPED);
+}
+
+static BOOL hr_marker(const char *tmp, const char *name) {
+    TelsContainer *c = tels_open(tmp, FALSE);
+    BOOL ok;
+    if (!c) return FALSE;
+    ok = media_entry_exists(c, name);
+    tels_close(c);
+    return ok;
+}
+
+static BOOL hr_drop(const char *tmp, const char *name) {
+    TelsContainer *c = tels_open(tmp, FALSE);
+    BOOL ok = FALSE;
+    if (!c) return FALSE;
+    ok = media_entry_drop(c, name) && tels_commit(c);
+    tels_close(c);
+    return ok;
+}
+
+static BOOL hr_put(const char *tmp, const char *name, const uint8_t *data, uint64_t len) {
+    TelsContainer *c = tels_open(tmp, FALSE);
+    BOOL ok = FALSE;
+    if (!c) return FALSE;
+    ok = media_entry_put(c, name, data, len, 4096u) && tels_commit(c);
+    tels_close(c);
+    return ok;
+}
+
+static BOOL hr_all_hits(int want) {
+    return hls_test_server_hits("/res/q0.ts") == want && hls_test_server_hits("/res/q1.ts") == want &&
+           hls_test_server_hits("/res/q2.ts") == want && hls_test_server_hits("/res/q3.ts") == want;
+}
+
+void test_hls_container_resume(void) {
+    uint32_t i;
+    HlsRun b;
+    SECTION("HLS container resume: a lost marker, a changed playlist, a damaged record");
+    if (!hls_test_server_start(HR_PORT)) {
+        TEST("test server starts", FALSE);
+        return;
+    }
+    for (i = 0; i < HR_SEGS; i++) {
+        hls_fill(hr_body[i], HR_SEG_LEN, i + 61u);
+        memcpy(hr_want + (size_t)i * HR_SEG_LEN, hr_body[i], HR_SEG_LEN);
+    }
+
+    /* 1: segment 1 keeps its data but loses its marker: only that segment is fetched again */
+    DeleteFileA("tels_res_hls_1.tels");
+    DeleteFileA("tels_res_hls_1.ts");
+    hr_setup(HR_PL_OLD, (uint32_t)(sizeof(HR_PL_OLD) - 1));
+    hls_test_server_reset_hits();
+    hr_first_run("tels_res_hls_1.tels", "tels_res_hls_1.m3u8");
+    TEST("the first run fetched the first two segments",
+         hls_test_server_hits("/res/q0.ts") == 1 && hls_test_server_hits("/res/q1.ts") == 1);
+    TEST("the container holds the marker of segment 1", hr_marker("tels_res_hls_1.tels", "d000001"));
+    TEST("the marker of segment 1 is removed", hr_drop("tels_res_hls_1.tels", "d000001"));
+    hls_test_server_reset_hits();
+    b = hr_run("tels_res_hls_1.tels", "tels_res_hls_1.m3u8");
+    TEST("the resumed run completes", hls_download_run(&b) == HLS_OK);
+    TEST("only the segment without its marker is fetched again",
+         hls_test_server_hits("/res/q0.ts") == 0 && hls_test_server_hits("/res/q1.ts") == 1 &&
+         hls_test_server_hits("/res/q2.ts") == 1 && hls_test_server_hits("/res/q3.ts") == 1);
+    TEST("the output equals the four segments joined",
+         hls_output_equals(b.final_path, hr_want, sizeof(hr_want)));
+    DeleteFileA(b.final_path);
+
+    /* 2: a playlist with new durations starts the download over */
+    DeleteFileA("tels_res_hls_2.tels");
+    DeleteFileA("tels_res_hls_2.ts");
+    hr_setup(HR_PL_OLD, (uint32_t)(sizeof(HR_PL_OLD) - 1));
+    hls_test_server_reset_hits();
+    hr_first_run("tels_res_hls_2.tels", "tels_res_hls_2.m3u8");
+    hr_setup(HR_PL_NEW, (uint32_t)(sizeof(HR_PL_NEW) - 1));
+    hls_test_server_reset_hits();
+    b = hr_run("tels_res_hls_2.tels", "tels_res_hls_2.m3u8");
+    TEST("a changed playlist: the resumed run completes", hls_download_run(&b) == HLS_OK);
+    TEST("a changed playlist starts over: every segment is fetched once", hr_all_hits(1));
+    TEST("a changed playlist: the output equals the four segments joined",
+         hls_output_equals(b.final_path, hr_want, sizeof(hr_want)));
+    DeleteFileA(b.final_path);
+
+    /* 3: a damaged resume record (garbage in hls.meta) starts the download over */
+    DeleteFileA("tels_res_hls_3.tels");
+    DeleteFileA("tels_res_hls_3.ts");
+    hr_setup(HR_PL_OLD, (uint32_t)(sizeof(HR_PL_OLD) - 1));
+    hls_test_server_reset_hits();
+    hr_first_run("tels_res_hls_3.tels", "tels_res_hls_3.m3u8");
+    TEST("the resume record is damaged in place",
+         hr_put("tels_res_hls_3.tels", "hls.meta", (const uint8_t *)"junk", 4u));
+    hls_test_server_reset_hits();
+    b = hr_run("tels_res_hls_3.tels", "tels_res_hls_3.m3u8");
+    TEST("a damaged record: the resumed run completes", hls_download_run(&b) == HLS_OK);
+    TEST("a damaged record starts over: every segment is fetched once", hr_all_hits(1));
+    TEST("a damaged record: the output equals the four segments joined",
+         hls_output_equals(b.final_path, hr_want, sizeof(hr_want)));
+    DeleteFileA(b.final_path);
+
+    hls_test_server_stop();
+}

@@ -43,6 +43,7 @@
 #define HLS_BUSY_TRIES     30u
 #define HLS_RETRY_CAP_SEC  60u
 #define HLS_META_NAME      "hls.meta"
+#define HLS_META_HEAD      "lass-hls 1\n"
 
 typedef MediaBuf HlsBuf;
 
@@ -224,9 +225,8 @@ static HlsStatus aes128_cbc_decrypt(HlsRun *run, const uint8_t key[HLS_KEY_LEN],
     return st;
 }
 
-static TelsId entry_find(TelsContainer *c, const char *name) {
-    return media_entry_find(c, name);
-}
+
+
 
 static BOOL entry_exists(TelsContainer *c, const char *name) {
     return media_entry_exists(c, name);
@@ -310,28 +310,13 @@ static void map_names(int m, char mn[16], char mk[16]) {
 
 
 
-/* متن hls.meta — سه خط با پیشوند ثابت */
+/* ── قالب hls.meta: نوشتن و خواندن در media_store.c ─────────────── */
 static int meta_format(char *buf, size_t sz, uint64_t fp, uint32_t segs, const char *final_name) {
-    return snprintf(buf, sz, "lass-hls 1\nfp=%016llx\nsegments=%u\nfinal=%s\n",
-                    (unsigned long long)fp, (unsigned)segs, final_name);
+    return media_meta_format(buf, sz, HLS_META_HEAD, fp, TRUE, segs, final_name);
 }
 
-static BOOL meta_parse(const char *text, uint64_t *fp, uint32_t *segs,
-                       char *final_name, size_t fn_sz) {
-    if (strncmp(text, "lass-hls 1\n", 11) != 0) return FALSE;
-    const char *f = strstr(text, "\nfp=");
-    const char *s = strstr(text, "\nsegments=");
-    const char *n = strstr(text, "\nfinal=");
-    if (!f || !s || !n) return FALSE;
-    *fp = (uint64_t)strtoull(f + 4, NULL, 16);
-    *segs = (uint32_t)strtoul(s + 10, NULL, 10);
-    const char *nb = n + 7;
-    const char *ne = strchr(nb, '\n');
-    size_t nl = ne ? (size_t)(ne - nb) : strlen(nb);
-    if (nl == 0 || nl >= fn_sz) return FALSE;
-    memcpy(final_name, nb, nl);
-    final_name[nl] = '\0';
-    return TRUE;
+static BOOL meta_load(TelsContainer *c, uint64_t *fp, uint32_t *segs, char *final_name, size_t fn_sz) {
+    return media_meta_load(c, HLS_META_NAME, HLS_META_HEAD, TRUE, fp, segs, final_name, fn_sz);
 }
 
 
@@ -342,17 +327,8 @@ static BOOL meta_parse(const char *text, uint64_t *fp, uint32_t *segs,
 
 
 
-/* hls.meta از کانتینر؛ اگر نباشد یا خراب باشد FALSE */
-static BOOL meta_load(TelsContainer *c, uint64_t *fp, uint32_t *segs,
-                      char *final_name, size_t fn_sz) {
-    TelsId id = entry_find(c, HLS_META_NAME);
-    uint64_t sz = 0;
-    if (!id || !tels_size(c, id, &sz) || sz == 0 || sz > 1024u) return FALSE;
-    char text[1025];
-    if (tels_read(c, id, 0, text, (uint32_t)sz) != (int32_t)sz) return FALSE;
-    text[sz] = '\0';
-    return meta_parse(text, fp, segs, final_name, fn_sz);
-}
+
+
 
 
 

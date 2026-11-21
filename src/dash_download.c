@@ -178,38 +178,17 @@ static void init_names(char tag, char in_name[16], char mk_name[16]) {
     snprintf(mk_name, 16, "%cinitd", tag);
 }
 
-/* متن dash.meta: هویت دانلود (fingerprint) و نام نهایی فایل */
+/* ── قالب dash.meta: نوشتن و خواندن در media_store.c ───────────── */
 static int meta_format(char *buf, size_t sz, uint64_t fp, const char *final_name) {
-    return snprintf(buf, sz, "%sfp=%016llx\nfinal=%s\n", DASH_META_HEAD,
-                    (unsigned long long)fp, final_name);
-}
-
-static BOOL meta_parse(const char *text, uint64_t *fp, char *final_name, size_t fn_sz) {
-    const char *f, *n, *nb, *ne;
-    size_t nl;
-    if (strncmp(text, DASH_META_HEAD, strlen(DASH_META_HEAD)) != 0) return FALSE;
-    f = strstr(text, "\nfp=");
-    n = strstr(text, "\nfinal=");
-    if (!f || !n) return FALSE;
-    *fp = (uint64_t)strtoull(f + 4, NULL, 16);
-    nb = n + 7;
-    ne = strchr(nb, '\n');
-    nl = ne ? (size_t)(ne - nb) : strlen(nb);
-    if (nl == 0 || nl >= fn_sz) return FALSE;
-    memcpy(final_name, nb, nl);
-    final_name[nl] = '\0';
-    return TRUE;
+    return media_meta_format(buf, sz, DASH_META_HEAD, fp, FALSE, 0u, final_name);
 }
 
 static BOOL meta_load(TelsContainer *c, uint64_t *fp, char *final_name, size_t fn_sz) {
-    TelsId id = entry_find(c, DASH_META_NAME);
-    uint64_t sz = 0;
-    char text[1025];
-    if (!id || !tels_size(c, id, &sz) || sz == 0 || sz > 1024u) return FALSE;
-    if (tels_read(c, id, 0, text, (uint32_t)sz) != (int32_t)sz) return FALSE;
-    text[sz] = '\0';
-    return meta_parse(text, fp, final_name, fn_sz);
+    return media_meta_load(c, DASH_META_NAME, DASH_META_HEAD, FALSE, fp, NULL, final_name, fn_sz);
 }
+
+
+
 
 
 

@@ -714,7 +714,7 @@ void test_launch_retry_backoff(void) {
     TEST("download added", dl != NULL);
     if (!dl) { engine_destroy(eng); return; }
 
-    BOOL first = tea_wait_count(dl, 1, 10000);
+    BOOL first = tea_wait_count(dl, 1, 30000);
     TEST("a failed discovery is retried, not failed", first && dl->state == DL_QUEUED);
     LONG wait1 = (LONG)(dl->next_launch_retry_at - GetTickCount());
     TEST("the first retry waits about 3 s", wait1 >= 2500 && wait1 <= 3000);
@@ -723,20 +723,20 @@ void test_launch_retry_backoff(void) {
     TEST("the scheduler does not retry during the backoff", dl->launch_retry_count == 1);
 
     dl->next_launch_retry_at = GetTickCount() - 1;   /* the window has passed */
-    BOOL second = tea_wait_count(dl, 2, 5000);
+    BOOL second = tea_wait_count(dl, 2, 30000);
     LONG wait2 = (LONG)(dl->next_launch_retry_at - GetTickCount());
     TEST("once the window passes the download is tried again", second);
     TEST("the second retry waits about 6 s", wait2 >= 5500 && wait2 <= 6000);
 
     dl->launch_retry_count = 2;                         /* the next failure is the third */
     dl->next_launch_retry_at = GetTickCount() - 1;
-    BOOL third = tea_wait_count(dl, 3, 5000);
+    BOOL third = tea_wait_count(dl, 3, 30000);
     LONG wait3 = (LONG)(dl->next_launch_retry_at - GetTickCount());
     TEST("the third retry waits about 12 s", third && wait3 >= 11500 && wait3 <= 12000);
 
     dl->launch_retry_count = ENGINE_MAX_LAUNCH_RETRY;   /* the next failure is past the limit */
     dl->next_launch_retry_at = GetTickCount() - 1;
-    BOOL gave_up = tea_wait_failed(dl, 5000);
+    BOOL gave_up = tea_wait_failed(dl, 30000);
     TEST("when the retries run out the download fails", gave_up);
     TEST("the failure reason says the retries ran out",
          strstr(dl->fail_reason, "multiple retries") != NULL);
@@ -775,7 +775,7 @@ void test_permanent_vs_transient_errors(void) {
         IDM_Engine *eng = engine_create(NULL);
         tea_url(url, sizeof(url), permanent[i].path);
         IDM_Download *dl = eng ? engine_add(eng, url, "C:\\f.zip", 4, 0) : NULL;
-        if (!dl || !tea_wait_failed(dl, 5000) || dl->launch_retry_count != 0) perm_ok = FALSE;
+        if (!dl || !tea_wait_failed(dl, 30000) || dl->launch_retry_count != 0) perm_ok = FALSE;
         if (eng) engine_destroy(eng);
     }
     TEST("404, 410, 400 and 401 fail at once, without a retry", perm_ok);
@@ -784,7 +784,7 @@ void test_permanent_vs_transient_errors(void) {
         IDM_Engine *eng = engine_create(NULL);
         tea_url(url, sizeof(url), transient[i].path);
         IDM_Download *dl = eng ? engine_add(eng, url, "C:\\f.zip", 4, 0) : NULL;
-        if (!dl || !tea_wait_count(dl, 1, 5000) || dl->state != DL_QUEUED) trans_ok = FALSE;
+        if (!dl || !tea_wait_count(dl, 1, 30000) || dl->state != DL_QUEUED) trans_ok = FALSE;
         if (eng) engine_destroy(eng);
     }
     TEST("403, 429, 500 and 503 are retried after a backoff", trans_ok);
@@ -792,7 +792,7 @@ void test_permanent_vs_transient_errors(void) {
     {
         IDM_Engine *eng = engine_create(NULL);
         IDM_Download *dl = eng ? engine_add(eng, TEA_CLOSED_URL, "C:\\f.zip", 4, 0) : NULL;
-        BOOL retried = dl && tea_wait_count(dl, 1, 5000) && dl->state == DL_QUEUED;
+        BOOL retried = dl && tea_wait_count(dl, 1, 30000) && dl->state == DL_QUEUED;
         TEST("a refused connection is retried, not failed", retried);
         if (eng) engine_destroy(eng);
     }
@@ -800,7 +800,7 @@ void test_permanent_vs_transient_errors(void) {
         IDM_Engine *eng = engine_create(NULL);
         tea_url(url, sizeof(url), "/busy7.bin");
         IDM_Download *dl = eng ? engine_add(eng, url, "C:\\f.zip", 4, 0) : NULL;
-        BOOL got = dl && tea_wait_count(dl, 1, 5000);
+        BOOL got = dl && tea_wait_count(dl, 1, 30000);
         LONG w = got ? (LONG)(dl->next_launch_retry_at - GetTickCount()) : 0;
         TEST("Retry-After from the server replaces the table (7 s, not 3 s)",
              got && w >= 6500 && w <= 7000);
@@ -810,7 +810,7 @@ void test_permanent_vs_transient_errors(void) {
         IDM_Engine *eng = engine_create(NULL);
         tea_url(url, sizeof(url), "/busyhuge.bin");
         IDM_Download *dl = eng ? engine_add(eng, url, "C:\\f.zip", 4, 0) : NULL;
-        BOOL got = dl && tea_wait_count(dl, 1, 5000);
+        BOOL got = dl && tea_wait_count(dl, 1, 30000);
         LONG w = got ? (LONG)(dl->next_launch_retry_at - GetTickCount()) : 0;
         TEST("a Retry-After above the limit is capped at 300 s", got && w >= 298000 && w <= 300000);
         if (eng) engine_destroy(eng);

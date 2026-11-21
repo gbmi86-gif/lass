@@ -17,6 +17,64 @@ static BOOL ms_make_file(const char *path) {
     return TRUE;
 }
 
+void test_media_meta(void) {
+    char buf[256];
+    char name[IDM_MAX_PATH];
+    uint64_t fp = 0;
+    uint32_t segs = 0;
+    int n;
+    uint8_t big[1100];
+    MediaHttp h;
+    TelsContainer *c;
+    static const char HLS_TEXT[] = "lass-hls 1\nfp=0123456789abcdef\nsegments=12\nfinal=movie (1).ts\n";
+    static const char DASH_TEXT[] = "lass-dash 1\nfp=0123456789abcdef\nfinal=show.mp4\n";
+
+    SECTION("Resume record (media_store): exact bytes, parsing rules, stored damage");
+    n = media_meta_format(buf, sizeof(buf), "lass-hls 1\n", 0x0123456789abcdefULL, TRUE, 12u, "movie (1).ts");
+    TEST("the HLS record is written byte for byte as before",
+         n == (int)strlen(HLS_TEXT) && strcmp(buf, HLS_TEXT) == 0);
+    n = media_meta_format(buf, sizeof(buf), "lass-dash 1\n", 0x0123456789abcdefULL, FALSE, 0u, "show.mp4");
+    TEST("the DASH record is written byte for byte as before",
+         n == (int)strlen(DASH_TEXT) && strcmp(buf, DASH_TEXT) == 0);
+    n = media_meta_format(buf, 20, "lass-hls 1\n", 0x0123456789abcdefULL, TRUE, 12u, "movie (1).ts");
+    TEST("a record that does not fit is refused, never cut", n == -1);
+    TEST("the HLS record parses back to the same values",
+         media_meta_parse(HLS_TEXT, "lass-hls 1\n", TRUE, &fp, &segs, name, sizeof(name)) &&
+         fp == 0x0123456789abcdefULL && segs == 12u && strcmp(name, "movie (1).ts") == 0);
+    TEST("the DASH record parses back to the same values",
+         media_meta_parse(DASH_TEXT, "lass-dash 1\n", FALSE, &fp, NULL, name, sizeof(name)) &&
+         fp == 0x0123456789abcdefULL && strcmp(name, "show.mp4") == 0);
+    TEST("an HLS reader rejects a DASH record",
+         !media_meta_parse(DASH_TEXT, "lass-hls 1\n", TRUE, &fp, &segs, name, sizeof(name)));
+    TEST("an HLS record without its segment count is rejected",
+         !media_meta_parse("lass-hls 1\nfp=01\nfinal=x.ts\n", "lass-hls 1\n", TRUE, &fp, &segs, name, sizeof(name)));
+    TEST("a record with an empty final name is rejected",
+         !media_meta_parse("lass-dash 1\nfp=01\nfinal=\n", "lass-dash 1\n", FALSE, &fp, NULL, name, sizeof(name)));
+    TEST("a final name that does not fit is rejected",
+         !media_meta_parse(DASH_TEXT, "lass-dash 1\n", FALSE, &fp, NULL, name, 5));
+    TEST("garbage is rejected",
+         !media_meta_parse("junk", "lass-dash 1\n", FALSE, &fp, NULL, name, sizeof(name)));
+
+    DeleteFileA("mstore_meta.tels");
+    memset(&h, 0, sizeof(h));
+    memset(big, 'x', sizeof(big));
+    c = media_container_open("mstore_meta.tels", 1, &h);
+    if (c) {
+        TEST("a stored HLS record is loaded with its values",
+             media_entry_put(c, "hls.meta", (const uint8_t *)HLS_TEXT, strlen(HLS_TEXT), 4096u) &&
+             media_meta_load(c, "hls.meta", "lass-hls 1\n", TRUE, &fp, &segs, name, sizeof(name)) &&
+             segs == 12u);
+        TEST("a stored record with garbage is not loaded",
+             media_entry_put(c, "hls.meta", (const uint8_t *)"junk", 4u, 4096u) &&
+             !media_meta_load(c, "hls.meta", "lass-hls 1\n", TRUE, &fp, &segs, name, sizeof(name)));
+        TEST("a stored record above the size limit is not loaded",
+             media_entry_put(c, "hls.meta", big, sizeof(big), 4096u) &&
+             !media_meta_load(c, "hls.meta", "lass-hls 1\n", TRUE, &fp, &segs, name, sizeof(name)));
+        media_container_finish(c);
+    }
+    DeleteFileA("mstore_meta.tels");
+}
+
 void test_media_store(void) {
     uint8_t data[10000], got[10000], copybuf[4096];
     MediaHttp h;
@@ -129,4 +187,5 @@ void test_media_store(void) {
          media_fnv_mix(MS_BASIS, "ab", 2) == media_fnv_mix(media_fnv_mix(MS_BASIS, "a", 1), "b", 1));
     TEST("different bytes give different fingerprints",
          media_fnv_mix(MS_BASIS, "a", 1) != media_fnv_mix(MS_BASIS, "b", 1));
+    test_media_meta();
 }

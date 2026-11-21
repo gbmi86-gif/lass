@@ -44,6 +44,16 @@ void           media_choose_final_path(const char *out_path, const char *ext,
                                        const char *const *strip, size_t n_strip,
                                        char *out, size_t sz);
 
+/* ---- متادیتای resume ---- */
+/* قالب: "<head>fp=<hex>[\nsegments=<n>]\nfinal=<name>\n"؛ بایت‌به‌بایت همان متن قبلی.
+   اگر بافر کوچک باشد -1 برمی‌گرداند؛ متن نیمه‌کاره هرگز ذخیره نمی‌شود. */
+int           media_meta_format(char *buf, size_t sz, const char *head, uint64_t fp,
+                                BOOL has_segs, uint32_t segs, const char *final_name);
+BOOL          media_meta_parse(const char *text, const char *head, BOOL has_segs,
+                               uint64_t *fp, uint32_t *segs, char *final_name, size_t fn_sz);
+BOOL          media_meta_load(TelsContainer *c, const char *name, const char *head, BOOL has_segs,
+                              uint64_t *fp, uint32_t *segs, char *final_name, size_t fn_sz);
+
 /* ---- اثر انگشت ---- */
 uint64_t       media_fnv_mix(uint64_t h, const void *p, size_t n);
 void           media_strip_query(const char *url, char *out, size_t sz);
