@@ -16,12 +16,12 @@ void test_engine_features(void) {
     eng->max_concurrent = 0;
     /* ── engine_add_batch ── */
     const char *batch_urls =
-        "http://example.com/file1.zip\n"
-        "http://example.com/file2.zip\n"
+        "http://127.0.0.1:18597/file1.zip\n"
+        "http://127.0.0.1:18597/file2.zip\n"
         "   \n"                          /* خط خالی — باید skip بشه */
-        "http://example.com/file3.zip\n"
+        "http://127.0.0.1:18597/file3.zip\n"
         "not_a_url\n"                    /* invalid — باید skip بشه */
-        "ftp://files.example.com/data.tar.gz\n";
+        "ftp://127.0.0.1:18597/data.tar.gz\n";
 
     int added = engine_add_batch(eng, batch_urls, NULL, 4, 0, "TestGroup");
     TEST("batch: 3 http + 1 ftp accepted (empty and invalid lines skipped)", added == 4);
@@ -102,7 +102,7 @@ void test_engine_features(void) {
     /* ── NULL safety ── */
     engine_schedule(NULL, 0, 12, 0);
     engine_unschedule(NULL, 0);
-    engine_add_batch(NULL, "http://x.com/f", NULL, 4, 0, NULL);
+    engine_add_batch(NULL, "http://127.0.0.1:18597/f", NULL, 4, 0, NULL);
     engine_clear_completed(NULL);
     TEST("null safety engine funcs", TRUE);
 
@@ -122,9 +122,9 @@ void test_engine_fifo(void) {
     TEST("engine create",         eng != NULL);
     if (!eng) return;
 
-    engine_add(eng, "http://example.com/first.zip",  "c:\\tmp\\1.zip", 1, 0);
-    engine_add(eng, "http://example.com/second.zip", "c:\\tmp\\2.zip", 1, 0);
-    engine_add(eng, "http://example.com/third.zip",  "c:\\tmp\\3.zip", 1, 0);
+    engine_add(eng, "http://127.0.0.1:18597/first.zip",  "c:\\tmp\\1.zip", 1, 0);
+    engine_add(eng, "http://127.0.0.1:18597/second.zip", "c:\\tmp\\2.zip", 1, 0);
+    engine_add(eng, "http://127.0.0.1:18597/third.zip",  "c:\\tmp\\3.zip", 1, 0);
 
     /* FIFO: اولین باید first.zip باشه */
     EnterCriticalSection(&eng->lock);
@@ -171,9 +171,9 @@ void test_engine_concurrent(void) {
     /* scheduler رو غیرفعال کن تا فقط queue logic رو تست کنیم */
     eng->max_concurrent = 0; /* هیچ auto-launch نشه */
 
-    IDM_Download *d1 = engine_add(eng, "http://a.com/f1.zip", "C:\\f1.zip", 4, 0);
-    IDM_Download *d2 = engine_add(eng, "http://b.com/f2.zip", "C:\\f2.zip", 4, 0);
-    IDM_Download *d3 = engine_add(eng, "http://c.com/f3.zip", "C:\\f3.zip", 4, 0);
+    IDM_Download *d1 = engine_add(eng, "http://127.0.0.1:18597/f1.zip", "C:\\f1.zip", 4, 0);
+    IDM_Download *d2 = engine_add(eng, "http://127.0.0.1:18597/f2.zip", "C:\\f2.zip", 4, 0);
+    IDM_Download *d3 = engine_add(eng, "http://127.0.0.1:18597/f3.zip", "C:\\f3.zip", 4, 0);
 
     TEST("3 downloads added",            d1 && d2 && d3);
     TEST("all start as QUEUED",
@@ -188,16 +188,22 @@ void test_engine_concurrent(void) {
     LeaveCriticalSection(&eng->lock);
     TEST("queue count is 3",             cnt == 3);
 
-    /* تنظیم max_concurrent و شبیه‌سازی چک scheduler */
+    /* زمان‌بند واقعی: فعالش می‌کنیم و منتظر می‌مانیم تا هر سه دانلود واقعاً تلاش شوند */
     eng->max_concurrent = 3;
-    int would_launch = 0;
-    EnterCriticalSection(&eng->lock);
-    for (IDM_Download *dl = eng->queue_head; dl; dl = dl->next)
-        if (dl->state == DL_QUEUED && eng->active_count < eng->max_concurrent)
-            would_launch++;
-    LeaveCriticalSection(&eng->lock);
-
-    TEST("scheduler would launch all 3", would_launch == 3);
+    if (!d1 || !d2 || !d3) {
+        TEST("the scheduler launches all 3 downloads (each one is tried)", FALSE);
+    } else {
+        DWORD t0 = GetTickCount();
+        BOOL all_tried = FALSE;
+        while (GetTickCount() - t0 < 30000u) {
+            if (d1->launch_retry_count >= 1 && d2->launch_retry_count >= 1 && d3->launch_retry_count >= 1) {
+                all_tried = TRUE;
+                break;
+            }
+            Sleep(50);
+        }
+        TEST("the scheduler launches all 3 downloads (each one is tried)", all_tried);
+    }
 
     engine_destroy(eng);
     TEST("engine destroy",               TRUE);
@@ -438,8 +444,8 @@ void test_url_credentials(void) {
     TEST("split removes the password from the URL", strcmp(clean, "ftp://alice@127.0.0.1:21/a.bin") == 0);
     TEST("split returns the password separately", strcmp(pass, "s3cret") == 0);
 
-    ok = url_split_credentials("http://example.com/x.zip", clean, sizeof(clean), pass, sizeof(pass));
-    TEST("URL without password is unchanged", ok && strcmp(clean, "http://example.com/x.zip") == 0 && pass[0] == '\0');
+    ok = url_split_credentials("http://127.0.0.1:18597/x.zip", clean, sizeof(clean), pass, sizeof(pass));
+    TEST("URL without password is unchanged", ok && strcmp(clean, "http://127.0.0.1:18597/x.zip") == 0 && pass[0] == '\0');
 
     char full[IDM_MAX_URL] = {0};
     TEST("inject rebuilds the authenticated URL",
@@ -703,6 +709,21 @@ static void tea_url(char *out, size_t sz, const char *path) {
     snprintf(out, sz, "http://127.0.0.1:%d%s", (int)TEA_SRV_PORT, path);
 }
 
+/* جدول backoff به‌صورت تابع خالص؛ هر مقدار مستقیم سنجیده می‌شود، از جمله سقف ۶۰ ثانیه */
+static void test_launch_backoff_table(void) {
+    SECTION("Engine: launch backoff table (pure function, including the 60 s cap)");
+    TEST("the first failure waits 3 s", engine_launch_backoff_ms(1, 0) == 3000u);
+    TEST("the wait doubles: 6 s, then 12 s",
+         engine_launch_backoff_ms(2, 0) == 6000u && engine_launch_backoff_ms(3, 0) == 12000u);
+    TEST("the last allowed attempt waits 48 s", engine_launch_backoff_ms(ENGINE_MAX_LAUNCH_RETRY, 0) == 48000u);
+    TEST("the 60 s cap holds for longer schedules",
+         engine_launch_backoff_ms(6, 0) == 60000u && engine_launch_backoff_ms(40, 0) == 60000u);
+    TEST("a Retry-After from the server replaces the table", engine_launch_backoff_ms(1, 7) == 7000u);
+    TEST("a Retry-After of 5 minutes or more is capped at 300 s",
+         engine_launch_backoff_ms(1, 300) == 300000u && engine_launch_backoff_ms(1, 4000000000u) == 300000u);
+    TEST("a count of zero is treated as the first failure", engine_launch_backoff_ms(0, 0) == 3000u);
+}
+
 void test_launch_retry_backoff(void) {
     SECTION("Engine: Launch Retry Backoff (real failed discoveries on a refused connection)");
 
@@ -742,6 +763,7 @@ void test_launch_retry_backoff(void) {
          strstr(dl->fail_reason, "multiple retries") != NULL);
 
     engine_destroy(eng);
+    test_launch_backoff_table();
 }
 
 /* ======================================================
@@ -830,7 +852,7 @@ void test_tels_temp_file(void) {
     TEST("engine create",       eng != NULL);
     if (!eng) return;
 
-    IDM_Download *dl = engine_add(eng, "http://example.com/movie.mp4",
+    IDM_Download *dl = engine_add(eng, "http://127.0.0.1:18597/movie.mp4",
                                   "C:\\Downloads\\movie.mp4", 4, 0);
     TEST("download added",      dl != NULL);
     if (dl) {
@@ -849,7 +871,7 @@ void test_tels_temp_file(void) {
     /* فیکس دفاعی: out_path خالی ("") قبلاً به‌عنوان یه مسیر معتبر
        قبول می‌شد (فقط NULL fallback داشت) و temp_path می‌شد فقط
        ".tels" — یه فایل با اسم ناقص در دایرکتوری جاری. */
-    IDM_Download *dl_empty = engine_add(eng, "http://example.com/x.zip",
+    IDM_Download *dl_empty = engine_add(eng, "http://127.0.0.1:18597/x.zip",
                                         "", 4, 0);
     TEST("empty out_path accepted without crashing", dl_empty != NULL);
     if (dl_empty) {
@@ -880,7 +902,7 @@ void test_tels_long_path(void) {
     }
     long_path[253] = '\0';
 
-    IDM_Download *dl = engine_add(eng, "http://example.com/file.bin",
+    IDM_Download *dl = engine_add(eng, "http://127.0.0.1:18597/file.bin",
                                   long_path, 4, 0);
     TEST("download added with long path", dl != NULL);
     if (dl) {
@@ -919,9 +941,9 @@ void test_queue_persist(void) {
     }
     eng->max_concurrent = 0; /* auto-launch نشه */
 
-    engine_add(eng, "http://example.com/a.zip", "C:\\Downloads\\a.zip", 4, 0);
-    engine_add(eng, "http://example.com/b.mp4", "C:\\Downloads\\b.mp4", 8, 0);
-    engine_add(eng, "http://example.com/c.pdf", "C:\\Downloads\\c.pdf", 2, 0);
+    engine_add(eng, "http://127.0.0.1:18597/a.zip", "C:\\Downloads\\a.zip", 4, 0);
+    engine_add(eng, "http://127.0.0.1:18597/b.mp4", "C:\\Downloads\\b.mp4", 8, 0);
+    engine_add(eng, "http://127.0.0.1:18597/c.pdf", "C:\\Downloads\\c.pdf", 2, 0);
 
     /* ── save در فروشگاه ── */
     BOOL saved = queue_persist_save(eng);
@@ -969,7 +991,7 @@ void test_queue_persist(void) {
     BOOL url_ok = FALSE;
     EnterCriticalSection(&eng2->lock);
     if (eng2->queue_head)
-        url_ok = (strstr(eng2->queue_head->url, "example.com") != NULL);
+        url_ok = (strstr(eng2->queue_head->url, "127.0.0.1:18597") != NULL);
     LeaveCriticalSection(&eng2->lock);
     TEST("url preserved", url_ok);
 

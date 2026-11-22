@@ -478,18 +478,9 @@ static DWORD WINAPI launch_thread_impl(LPVOID param) {
             if (dl->launch_retry_count <= ENGINE_MAX_LAUNCH_RETRY) {
                 DWORD backoff_ms;
                 bool  server_specified = (info.retry_after_sec > 0);
-                if (server_specified) {
-                    /* گفتگو، نه دیکته: سرور صراحتاً از طریق
-                       Retry-After گفته چقدر صبر کنیم — به‌جای حدس
-                       زدن خودمون با یه جدول exponential ثابت،
-                       دقیقاً همون رو رعایت می‌کنیم (با یه سقف
-                       امنیتی معقول). */
-                    backoff_ms = info.retry_after_sec * 1000u;
-                    if (backoff_ms > 300000u) backoff_ms = 300000u; /* سقف ۵ دقیقه */
-                } else {
-                    backoff_ms = 3000u * (1u << (dl->launch_retry_count - 1));
-                    if (backoff_ms > 60000) backoff_ms = 60000; /* سقف ۶۰ ثانیه */
-                }
+                  /* گفتگو، نه دیکته: Retry-After سرور اگر باشد رعایت می‌شود (سقف ۵ دقیقه)؛
+                     وگرنه جدول ۳ ثانیه‌ای دو برابرشونده با سقف ۶۰ ثانیه — در engine_launch_backoff_ms */
+                  backoff_ms = engine_launch_backoff_ms(dl->launch_retry_count, info.retry_after_sec);
                 dl->next_launch_retry_at = GetTickCount() + backoff_ms;
                 dl->state = DL_QUEUED; /* scheduler دوباره بعد از backoff امتحان می‌کنه */
                 eng->active_count--;
@@ -1933,4 +1924,20 @@ int engine_clear_completed(IDM_Engine *eng) {
 
     LOGI(LOG_MOD_ENGINE, "Cleared %d completed download(s)", removed);
     return removed;
+}
+
+/* مدت انتظار پس از شکست اتصال (میلی‌ثانیه).
+   retry_after_sec > 0 یعنی سرور گفته؛ همان تا سقف ۵ دقیقه رعایت می‌شود.
+   در غیر این صورت ۳ ثانیه برای شکست اول، دو برابر در هر شکست، و سقف ۶۰ ثانیه.
+   توان بالاتر از ۵ همان سقف ۶۰ ثانیه را می‌دهد، پس آن را محدود می‌کنیم تا سرریز نشود. */
+uint32_t engine_launch_backoff_ms(uint32_t count, uint32_t retry_after_sec) {
+    uint32_t exp, ms;
+    if (retry_after_sec > 0u) {
+        if (retry_after_sec >= 300u) return 300000u;
+        return retry_after_sec * 1000u;
+    }
+    exp = count > 0u ? count - 1u : 0u;
+    if (exp > 5u) exp = 5u;
+    ms = 3000u * (1u << exp);
+    return ms > 60000u ? 60000u : ms;
 }

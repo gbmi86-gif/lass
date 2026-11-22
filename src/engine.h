@@ -190,6 +190,9 @@ void         engine_report_host_trouble(const char *host);
    خط ('\n')، بایت‌های غیر-ASCII به %XX. out==NULL: فقط می‌شمره.
    بافر امن: strlen(text)*3+2 بایت. برمی‌گردونه: تعداد URL یکتا. */
 int          engine_extract_urls(const char *text, char *out, size_t out_sz);
+/* مدت انتظار پس از شکست اتصال (میلی‌ثانیه): Retry-After سرور، یا جدول ۳ ثانیه‌ای
+   دو برابرشونده با سقف ۶۰ ثانیه */
+uint32_t engine_launch_backoff_ms(uint32_t count, uint32_t retry_after_sec);
 
 /* فقط برای تست — wrapper صادرشده‌ی pick_seg_count (که static
    هست) تا test_all.c بتونه منطق واقعی «شروع محتاطانه‌تر روی
