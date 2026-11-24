@@ -500,7 +500,7 @@ void test_url_credentials(void) {
         snprintf(rec.url, sizeof(rec.url), "%s", "http://127.0.0.1:1/v1.bin");
         snprintf(rec.out_path, sizeof(rec.out_path), "%s", "v1_test.bin");
         rec.state = DL_PAUSED;
-        rec.num_segments = 1;
+        rec.max_segments = 1;
         FILE *f = fopen(v1path, "wb");
         if (f) {
             fwrite(&h, sizeof(h), 1, f);
@@ -1084,3 +1084,150 @@ void test_resume_and_zero_byte(void) {
     }
 }
 
+/* ======================================================
+   تست: توقف یک دانلود در حال انتقال و از سرگیری آن از طریق موتور
+   ====================================================== */
+#define TGP_PORT  18603
+#define TGP_SIZE  (512u * 1024u)
+static uint8_t tgp_body[TGP_SIZE];
+
+void test_engine_pause_resume(void) {
+    IDM_Engine *eng;
+    IDM_Download *dl;
+    uint32_t i;
+    DWORD t0;
+    BOOL held = FALSE, stopped = FALSE, completed = FALSE, same = FALSE;
+    FILE *f;
+    uint8_t *got;
+    size_t n;
+
+    SECTION("Engine: pause a running download, then resume it through the engine");
+    for (i = 0; i < TGP_SIZE; i++) tgp_body[i] = (uint8_t)(i * 13u + 5u);
+    DeleteFileA("tgp_out.bin");
+    if (!hls_test_server_start(TGP_PORT)) {
+        TEST("test server starts", FALSE);
+        return;
+    }
+    hls_test_server_set("/gate.bin", tgp_body, TGP_SIZE);
+    hls_test_server_gate("/gate.bin");
+    hls_test_server_reset_hits();
+
+    eng = engine_create(NULL);
+    TEST("engine create", eng != NULL);
+    if (!eng) {
+        hls_test_server_stop();
+        return;
+    }
+    dl = engine_add(eng, "http://127.0.0.1:18603/gate.bin", "tgp_out.bin", 4, 0);
+    TEST("download added", dl != NULL);
+    if (dl) {
+        /* HEAD (کشف) و حداقل یک GET به سرور رسیده و آنجا منتظر مانده‌اند */
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < 15000u) {
+            if (hls_test_server_hits("/gate.bin") >= 2) {
+                held = TRUE;
+                break;
+            }
+            Sleep(20);
+        }
+        TEST("the segment requests reach the server and wait there", held);
+
+        engine_pause(eng, dl->id);
+        TEST("pausing marks the download PAUSED", dl->state == DL_PAUSED);
+        hls_test_server_release();
+
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < 15000u) {
+            if (eng->active_count == 0) {
+                stopped = TRUE;
+                break;
+            }
+            Sleep(20);
+        }
+        TEST("the paused download stops and frees its slot", stopped && dl->state == DL_PAUSED);
+        TEST("a paused download leaves no output file", GetFileAttributesA("tgp_out.bin") == INVALID_FILE_ATTRIBUTES);
+
+        engine_resume(eng, dl->id);
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < 60000u) {
+            if (dl->state == DL_COMPLETED) {
+                completed = TRUE;
+                break;
+            }
+            if (dl->state == DL_FAILED) break;
+            Sleep(50);
+        }
+        TEST("the resumed download completes", completed);
+
+        got = (uint8_t *)malloc(TGP_SIZE);
+        f = fopen("tgp_out.bin", "rb");
+        if (f && got) {
+            n = fread(got, 1, TGP_SIZE, f);
+            same = (n == TGP_SIZE && memcmp(got, tgp_body, TGP_SIZE) == 0);
+        }
+        if (f) fclose(f);
+        free(got);
+        TEST("the output equals the original bytes", same);
+    }
+    engine_destroy(eng);
+    hls_test_server_stop();
+    DeleteFileA("tgp_out.bin");
+}
+
+/* ======================================================
+   تست: هر دانلود ذخیره‌شده‌ی صف مسیر خروجی و تعداد بخش‌هایش را نگه می‌دارد
+   ====================================================== */
+void test_queue_round_trip(void) {
+    IDM_Engine *eng;
+    IDM_Engine *eng2;
+    uint32_t count = 0, w;
+    BOOL out_ok = TRUE, seg_ok = TRUE;
+    static const struct { const char *url; const char *out; uint32_t segs; } want[3] = {
+        { "http://127.0.0.1:18597/a.zip", "C:\\Downloads\\a.zip", 4u },
+        { "http://127.0.0.1:18597/b.mp4", "C:\\Downloads\\b.mp4", 8u },
+        { "http://127.0.0.1:18597/c.pdf", "C:\\Downloads\\c.pdf", 2u },
+    };
+
+    SECTION("Queue round trip: output path and segment setting come back for every download");
+    lass_store_close();
+    DeleteFileA("tels_test_queue_rt.tels");
+    TEST("store opens for the round trip", lass_store_open("tels_test_queue_rt.tels"));
+    eng = engine_create(NULL);
+    if (!eng) {
+        lass_store_close();
+        DeleteFileA("tels_test_queue_rt.tels");
+        return;
+    }
+    eng->max_concurrent = 0;
+    for (w = 0; w < 3; w++) engine_add(eng, want[w].url, want[w].out, want[w].segs, 0);
+    TEST("the queue is saved", queue_persist_save(eng));
+    engine_destroy(eng);
+    lass_store_close();
+    TEST("store reopens", lass_store_open("tels_test_queue_rt.tels"));
+
+    eng2 = engine_create(NULL);
+    if (!eng2) {
+        lass_store_close();
+        DeleteFileA("tels_test_queue_rt.tels");
+        return;
+    }
+    eng2->max_concurrent = 0;
+    TEST("the queue is loaded", queue_persist_load(eng2, NULL));
+    EnterCriticalSection(&eng2->lock);
+    for (IDM_Download *dl = eng2->queue_head; dl; dl = dl->next) {
+        count++;
+        for (w = 0; w < 3; w++) {
+            if (strcmp(dl->url, want[w].url) == 0) {
+                if (strcmp(dl->out_path, want[w].out) != 0) out_ok = FALSE;
+                if (dl->max_segments != want[w].segs) seg_ok = FALSE;
+            }
+        }
+    }
+    LeaveCriticalSection(&eng2->lock);
+    TEST("the restored queue has exactly the three downloads", count == 3);
+    TEST("every restored download keeps its output path", out_ok);
+    TEST("every restored download keeps its segment setting", seg_ok);
+    engine_destroy(eng2);
+    lass_store_close();
+    DeleteFileA("tels_test_queue_rt.tels");
+}

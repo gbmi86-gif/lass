@@ -21,6 +21,7 @@ typedef struct {
     int            fail_left;     /* -1 یعنی همیشه؛ 0 یعنی تمام؛ وگرنه باقی‌مانده */
     int            fail_retry_after; /* Retry-After همراه خطا؛ 0 یعنی ندارد */
     BOOL           ignore_range;     /* TRUE: Range را نادیده بگیر و 200 کامل بده */
+    BOOL           gated;            /* TRUE: GET answers wait for hls_test_server_release() */
     int            hits;
 } HlsTsRoute;
 
@@ -122,6 +123,8 @@ static void send_all(SOCKET s, const void *data, size_t n) {
     }
 }
 
+static HANDLE g_gate = NULL;
+
 static void handle_conn(SOCKET cs) {
     DWORD tmo = 5000;
     setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tmo, sizeof(tmo));
@@ -173,11 +176,13 @@ static void handle_conn(SOCKET cs) {
     unsigned long long cr_start = 0, cr_end = 0, total = 0;
     int retry_after = 0;
     BOOL partial = FALSE;
+    BOOL hold = FALSE;
 
     EnterCriticalSection(&g_lock);
     HlsTsRoute *r = route_find(path, FALSE);
     if (r) {
         r->hits++;
+        hold = r->gated && !is_head;
         if (r->fail_status != 0 && r->fail_left != 0) {
             status = r->fail_status;
             retry_after = r->fail_retry_after;
@@ -206,6 +211,7 @@ static void handle_conn(SOCKET cs) {
         }
     }
     LeaveCriticalSection(&g_lock);
+    if (hold && g_gate) WaitForSingleObject(g_gate, 20000);
 
     char head[512];
     int hl;
@@ -236,6 +242,7 @@ static DWORD WINAPI hls_server_thread(LPVOID unused) {
 }
 
 BOOL hls_test_server_start(uint16_t port) {
+    if (!g_gate) g_gate = CreateEventA(NULL, TRUE, TRUE, NULL);
     if (!g_lock_ready) {
         InitializeCriticalSection(&g_lock);
         g_lock_ready = TRUE;
@@ -274,6 +281,7 @@ BOOL hls_test_server_start(uint16_t port) {
 }
 
 void hls_test_server_stop(void) {
+    if (g_gate) SetEvent(g_gate);
     InterlockedExchange(&g_running, 0);
     if (g_listen != INVALID_SOCKET) {
         closesocket(g_listen);
@@ -302,4 +310,16 @@ void hls_test_server_ignore_range(const char *path) {
     HlsTsRoute *r = route_find(path, TRUE);
     if (r) r->ignore_range = TRUE;
     LeaveCriticalSection(&g_lock);
+}
+
+void hls_test_server_gate(const char *path) {
+    EnterCriticalSection(&g_lock);
+    HlsTsRoute *r = route_find(path, TRUE);
+    if (r) r->gated = TRUE;
+    LeaveCriticalSection(&g_lock);
+    if (g_gate) ResetEvent(g_gate);
+}
+
+void hls_test_server_release(void) {
+    if (g_gate) SetEvent(g_gate);
 }

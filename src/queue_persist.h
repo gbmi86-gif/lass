@@ -27,7 +27,7 @@ typedef struct {
     uint64_t total_size;
     uint64_t downloaded;
     uint32_t state;          /* DL_State */
-    uint32_t num_segments;
+    uint32_t max_segments;
     char     group_name[64];
     uint32_t group_id;
     BOOL     has_schedule;

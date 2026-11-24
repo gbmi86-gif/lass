@@ -70,7 +70,7 @@ BOOL queue_persist_save(IDM_Engine *eng) {
         r->total_size   = dl->total_size;
         r->downloaded   = (uint64_t)dl->downloaded;
         r->state        = (uint32_t)dl->state;
-        r->num_segments = dl->num_segments;
+        r->max_segments = dl->max_segments;
         r->group_id     = dl->group_id;
         r->has_schedule = dl->has_schedule;
         r->sched_low    = dl->scheduled_at.dwLowDateTime;
@@ -184,7 +184,7 @@ static BOOL queue_load_buffer(IDM_Engine *eng, const uint8_t *data, size_t len, 
 
         /* اضافه کردن به engine بدون شروع خودکار */
         IDM_Download *dl = engine_add(eng, r->url, r->out_path,
-                                       r->num_segments ? r->num_segments : 8, 0);
+                                       r->max_segments ? r->max_segments : 8, 0);
         if (!dl) continue;
         if (rv->pass_enc[0]) engine_dl_restore_password(dl, rv->pass_enc);
 

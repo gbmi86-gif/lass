@@ -196,4 +196,6 @@ void test_media_http(void);
 void test_media_store(void);
 void test_hls_container_resume(void);
 void test_dash_container_resume(void);
+void test_engine_pause_resume(void);
+void test_queue_round_trip(void);
 #endif /* LASS_TEST_COMMON_H */
