@@ -198,4 +198,6 @@ void test_hls_container_resume(void);
 void test_dash_container_resume(void);
 void test_engine_pause_resume(void);
 void test_queue_round_trip(void);
+void test_engine_cancel_active(void);
+void test_engine_remove_active(void);
 #endif /* LASS_TEST_COMMON_H */

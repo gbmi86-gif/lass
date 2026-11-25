@@ -83,6 +83,8 @@ int main(void) {
     test_dash_container_resume();
     test_engine_pause_resume();
     test_queue_round_trip();
+    test_engine_cancel_active();
+    test_engine_remove_active();
     test_media_http();
     test_media_store();
     test_resume_and_zero_byte();

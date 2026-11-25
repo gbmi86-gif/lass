@@ -1272,6 +1272,8 @@ uint64_t engine_get_global_speed_limit(IDM_Engine *eng) {
    ====================================================== */
 static void dl_teardown_unlinked(IDM_Download *dl) {
     bool any_zombie = false;
+    /* حذف یعنی دور ریختن: resume state دانلودی که کامل نشده نباید یتیم بماند */
+    if (dl->state != DL_COMPLETED) resume_remove(dl);
     if (dl->segments) {
         for (uint32_t i = 0; i < dl->num_segments; i++)
             if (dl->segments[i] && !seg_destroy(dl->segments[i])) any_zombie = true;
@@ -1285,6 +1287,8 @@ static void dl_teardown_unlinked(IDM_Download *dl) {
         return;
     }
     if (dl->writer) fw_close(dl->writer);
+    /* فایل موقت دانلودی که کامل نشده هم دور ریخته می‌شود؛ بعد از بستن writer */
+    if (dl->state != DL_COMPLETED && dl->temp_path[0] != '\0') DeleteFileA(dl->temp_path);
     free(dl->resume_segs);
     DeleteCriticalSection(&dl->lock);
     free(dl);
@@ -1466,6 +1470,7 @@ void engine_cancel(IDM_Engine *eng, uint32_t id) {
                  "to avoid use-after-free", id);
         } else if (dl_ref->writer) {
             fw_close(dl_ref->writer);
+            DeleteFileA(dl_ref->temp_path);
             dl_ref->writer = NULL;
         }
     }

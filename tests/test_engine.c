@@ -1231,3 +1231,136 @@ void test_queue_round_trip(void) {
     lass_store_close();
     DeleteFileA("tels_test_queue_rt.tels");
 }
+
+/* ======================================================
+   تست: لغو و حذف یک دانلود وقتی انتقالش نگه داشته شده است
+   ====================================================== */
+#define TCC_PORT  18604
+#define TCC_SIZE  (256u * 1024u)
+#define TCR_PORT  18605
+static uint8_t tcc_body[TCC_SIZE];
+
+static BOOL tgx_wait_held(const char *route, DWORD timeout_ms) {
+    DWORD t0 = GetTickCount();
+    while (GetTickCount() - t0 < timeout_ms) {
+        if (hls_test_server_hits(route) >= 2) return TRUE;
+        Sleep(20);
+    }
+    return FALSE;
+}
+
+void test_engine_cancel_active(void) {
+    IDM_Engine *eng;
+    IDM_Download *dl;
+    char temp[IDM_MAX_PATH];
+    uint32_t i, id = 0;
+    DWORD t0;
+    BOOL held = FALSE, gone = FALSE;
+
+    SECTION("Engine: cancel a download while its transfer is held");
+    for (i = 0; i < TCC_SIZE; i++) tcc_body[i] = (uint8_t)(i * 7u + 1u);
+    DeleteFileA("tcc_out.bin");
+    temp[0] = '\0';
+    if (!hls_test_server_start(TCC_PORT)) {
+        TEST("test server starts", FALSE);
+        return;
+    }
+    hls_test_server_set("/held.bin", tcc_body, TCC_SIZE);
+    hls_test_server_gate("/held.bin");
+    hls_test_server_reset_hits();
+    eng = engine_create(NULL);
+    TEST("engine create", eng != NULL);
+    if (!eng) {
+        hls_test_server_stop();
+        return;
+    }
+    dl = engine_add(eng, "http://127.0.0.1:18604/held.bin", "tcc_out.bin", 4, 0);
+    TEST("download added", dl != NULL);
+    if (dl) {
+        id = dl->id;
+        held = tgx_wait_held("/held.bin", 15000u);
+        TEST("the transfer is held at the server", held);
+        snprintf(temp, sizeof(temp), "%s", dl->temp_path);
+        TEST("the temporary file exists while the transfer is held",
+             GetFileAttributesA(temp) != INVALID_FILE_ATTRIBUTES);
+
+        engine_cancel(eng, id);
+        TEST("cancelling marks the download CANCELLED at once", dl->state == DL_CANCELLED);
+        hls_test_server_release();
+
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < 20000u) {
+            if (eng->active_count == 0 && GetFileAttributesA(temp) == INVALID_FILE_ATTRIBUTES) {
+                gone = TRUE;
+                break;
+            }
+            Sleep(20);
+        }
+        TEST("the cancelled transfer stops and frees its slot", eng->active_count == 0);
+        TEST("a cancelled download removes its temporary file", gone);
+        TEST("a cancelled download leaves no output file",
+             GetFileAttributesA("tcc_out.bin") == INVALID_FILE_ATTRIBUTES);
+        TEST("a cancelled download stays listed", engine_find(eng, id) != NULL);
+    }
+    engine_destroy(eng);
+    hls_test_server_stop();
+    DeleteFileA("tcc_out.bin");
+}
+
+void test_engine_remove_active(void) {
+    IDM_Engine *eng;
+    IDM_Download *dl;
+    char temp[IDM_MAX_PATH];
+    uint32_t i, id = 0;
+    DWORD t0;
+    BOOL held = FALSE, gone = FALSE;
+
+    SECTION("Engine: remove a download while its transfer is held");
+    for (i = 0; i < TCC_SIZE; i++) tcc_body[i] = (uint8_t)(i * 11u + 3u);
+    DeleteFileA("tcr_out.bin");
+    temp[0] = '\0';
+    if (!hls_test_server_start(TCR_PORT)) {
+        TEST("test server starts", FALSE);
+        return;
+    }
+    hls_test_server_set("/held2.bin", tcc_body, TCC_SIZE);
+    hls_test_server_gate("/held2.bin");
+    hls_test_server_reset_hits();
+    eng = engine_create(NULL);
+    TEST("engine create", eng != NULL);
+    if (!eng) {
+        hls_test_server_stop();
+        return;
+    }
+    dl = engine_add(eng, "http://127.0.0.1:18605/held2.bin", "tcr_out.bin", 4, 0);
+    TEST("download added", dl != NULL);
+    if (dl) {
+        id = dl->id;
+        held = tgx_wait_held("/held2.bin", 15000u);
+        TEST("the transfer is held at the server", held);
+        snprintf(temp, sizeof(temp), "%s", dl->temp_path);
+        TEST("the temporary file exists while the transfer is held",
+             GetFileAttributesA(temp) != INVALID_FILE_ATTRIBUTES);
+
+        engine_remove(eng, id);
+        TEST("removing unlinks the download at once", engine_find(eng, id) == NULL);
+        hls_test_server_release();
+
+        /* dl ممکن است بعد از پایان انتقال آزاد شود؛ از این‌جا به بعد فقط مسیر و نتیجه‌ی فایل‌ها را می‌سنجیم */
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < 20000u) {
+            if (eng->active_count == 0 && GetFileAttributesA(temp) == INVALID_FILE_ATTRIBUTES) {
+                gone = TRUE;
+                break;
+            }
+            Sleep(20);
+        }
+        TEST("the removed transfer stops and frees its slot", eng->active_count == 0);
+        TEST("a removed download removes its temporary file", gone);
+        TEST("a removed download leaves no output file",
+             GetFileAttributesA("tcr_out.bin") == INVALID_FILE_ATTRIBUTES);
+    }
+    engine_destroy(eng);
+    hls_test_server_stop();
+    DeleteFileA("tcr_out.bin");
+}
