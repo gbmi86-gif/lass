@@ -85,6 +85,7 @@ int main(void) {
     test_queue_round_trip();
     test_engine_cancel_active();
     test_engine_remove_active();
+    test_engine_restart_resume();
     test_media_http();
     test_media_store();
     test_resume_and_zero_byte();

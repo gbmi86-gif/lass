@@ -25,4 +25,9 @@ void hls_test_server_fail_retry_after(const char *path, int status, int times, i
 void hls_test_server_ignore_range(const char *path);
 void hls_test_server_gate(const char *path);
 void hls_test_server_release(void);
+void hls_test_server_gate_after(const char *path, int n);
+int hls_test_server_gets(const char *path);
+unsigned long long hls_test_server_get_start(const char *path, int i);
+void hls_test_server_reset_gets(const char *path);
+void hls_test_server_accept_ranges(const char *path);
 #endif /* LASS_TEST_HLS_SERVER_H */

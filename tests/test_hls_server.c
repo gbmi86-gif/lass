@@ -22,6 +22,10 @@ typedef struct {
     int            fail_retry_after; /* Retry-After همراه خطا؛ 0 یعنی ندارد */
     BOOL           ignore_range;     /* TRUE: Range را نادیده بگیر و 200 کامل بده */
     BOOL           gated;            /* TRUE: GET answers wait for hls_test_server_release() */
+    int            gets;             /* GET ها از آخرین reset */
+    int            gate_after;       /* این تعداد GET اول جواب داده می‌شود */
+    unsigned long long get_start[8]; /* شروع بازهٔ GET های اول */
+    BOOL           ranges;           /* TRUE: Accept-Ranges: bytes در پاسخ‌های 200 */
     int            hits;
 } HlsTsRoute;
 
@@ -177,12 +181,18 @@ static void handle_conn(SOCKET cs) {
     int retry_after = 0;
     BOOL partial = FALSE;
     BOOL hold = FALSE;
+    BOOL ranges_hdr = FALSE;
 
     EnterCriticalSection(&g_lock);
     HlsTsRoute *r = route_find(path, FALSE);
     if (r) {
         r->hits++;
-        hold = r->gated && !is_head;
+        ranges_hdr = r->ranges;
+        if (!is_head) {
+            r->gets++;
+            if (r->gets <= 8) r->get_start[r->gets - 1] = has_range ? rs : 0ULL;
+            hold = r->gated && r->gets > r->gate_after;
+        }
         if (r->fail_status != 0 && r->fail_left != 0) {
             status = r->fail_status;
             retry_after = r->fail_retry_after;
@@ -223,6 +233,8 @@ static void handle_conn(SOCKET cs) {
         hl = snprintf(head, sizeof(head), "HTTP/1.1 %d %s\r\n", status, reason_of(status));
     if (retry_after > 0)
         hl += snprintf(head + hl, sizeof(head) - (size_t)hl, "Retry-After: %d\r\n", retry_after);
+    if (ranges_hdr && status == 200)
+        hl += snprintf(head + hl, sizeof(head) - (size_t)hl, "Accept-Ranges: bytes\r\n");
     hl += snprintf(head + hl, sizeof(head) - (size_t)hl,
                    "Content-Length: %u\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
                    (unsigned int)blen);
@@ -315,11 +327,55 @@ void hls_test_server_ignore_range(const char *path) {
 void hls_test_server_gate(const char *path) {
     EnterCriticalSection(&g_lock);
     HlsTsRoute *r = route_find(path, TRUE);
-    if (r) r->gated = TRUE;
+    if (r) { r->gated = TRUE; r->gate_after = 0; }
     LeaveCriticalSection(&g_lock);
     if (g_gate) ResetEvent(g_gate);
 }
 
 void hls_test_server_release(void) {
     if (g_gate) SetEvent(g_gate);
+}
+
+void hls_test_server_gate_after(const char *path, int n) {
+    EnterCriticalSection(&g_lock);
+    HlsTsRoute *r = route_find(path, TRUE);
+    if (r) {
+        r->gated = TRUE;
+        r->gate_after = n;
+        r->gets = 0;
+    }
+    LeaveCriticalSection(&g_lock);
+    if (g_gate) ResetEvent(g_gate);
+}
+
+int hls_test_server_gets(const char *path) {
+    int n = 0;
+    EnterCriticalSection(&g_lock);
+    HlsTsRoute *r = route_find(path, FALSE);
+    if (r) n = r->gets;
+    LeaveCriticalSection(&g_lock);
+    return n;
+}
+
+unsigned long long hls_test_server_get_start(const char *path, int i) {
+    unsigned long long v = ~0ULL;
+    EnterCriticalSection(&g_lock);
+    HlsTsRoute *r = route_find(path, FALSE);
+    if (r && i >= 0 && i < 8 && i < r->gets) v = r->get_start[i];
+    LeaveCriticalSection(&g_lock);
+    return v;
+}
+
+void hls_test_server_reset_gets(const char *path) {
+    EnterCriticalSection(&g_lock);
+    HlsTsRoute *r = route_find(path, FALSE);
+    if (r) r->gets = 0;
+    LeaveCriticalSection(&g_lock);
+}
+
+void hls_test_server_accept_ranges(const char *path) {
+    EnterCriticalSection(&g_lock);
+    HlsTsRoute *r = route_find(path, TRUE);
+    if (r) r->ranges = TRUE;
+    LeaveCriticalSection(&g_lock);
 }

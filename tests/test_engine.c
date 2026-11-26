@@ -1364,3 +1364,140 @@ void test_engine_remove_active(void) {
     hls_test_server_stop();
     DeleteFileA("tcr_out.bin");
 }
+
+/* ======================================================
+   تست: دانلود بخش‌بخش که وسط راه متوقف شده، بعد از ری‌استارت ادامه می‌یابد
+   و بخش کامل‌شده دوباره درخواست نمی‌شود
+   ====================================================== */
+#define TRS_PORT  18606
+#define TRS_SIZE  (4u * 1024u * 1024u)
+
+void test_engine_restart_resume(void) {
+    IDM_Engine *eng = NULL, *eng2 = NULL;
+    IDM_Download *dl = NULL;
+    uint8_t *body = NULL, *got = NULL;
+    uint32_t i, id = 0, id2 = 0;
+    DWORD t0;
+    LONGLONG part = 0;
+    unsigned long long first_start = 0;
+    int gets_before = 0, gets_after = 0, k;
+    BOOL split = FALSE, interrupted = FALSE, stopped = FALSE, completed = FALSE, reused = FALSE, same = FALSE;
+    FILE *f;
+    size_t n;
+
+    SECTION("Engine: a segmented download interrupted mid-way resumes after a restart without refetching finished bytes");
+    body = (uint8_t *)malloc(TRS_SIZE);
+    got = (uint8_t *)malloc(TRS_SIZE);
+    if (!body || !got) {
+        TEST("memory for the restart test", FALSE);
+        free(body);
+        free(got);
+        return;
+    }
+    for (i = 0; i < TRS_SIZE; i++) body[i] = (uint8_t)(i * 17u + 9u);
+    DeleteFileA("trs_out.bin");
+    if (!hls_test_server_start(TRS_PORT)) {
+        TEST("test server starts", FALSE);
+        free(body);
+        free(got);
+        return;
+    }
+    hls_test_server_set("/restart.bin", body, TRS_SIZE);
+    hls_test_server_accept_ranges("/restart.bin");
+    hls_test_server_gate_after("/restart.bin", 1); /* اولین GET جواب داده می‌شود؛ بقیه منتظر می‌مانند */
+    hls_test_server_reset_hits();
+    hls_test_server_reset_gets("/restart.bin");
+
+    lass_store_close();
+    DeleteFileA("tels_test_restart.tels");
+    TEST("store opens for the restart test", lass_store_open("tels_test_restart.tels"));
+
+    eng = engine_create(NULL);
+    TEST("engine create", eng != NULL);
+    dl = eng ? engine_add(eng, "http://127.0.0.1:18606/restart.bin", "trs_out.bin", 4, 0) : NULL;
+    TEST("download added", dl != NULL);
+    if (dl) {
+        id = dl->id;
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < 30000u && dl->num_segments == 0) Sleep(20);
+        split = dl->num_segments >= 2;
+        TEST("the download is split into several segments", split);
+        part = (LONGLONG)(TRS_SIZE / (dl->num_segments ? dl->num_segments : 1u));
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < 30000u) {
+            if (dl->downloaded >= part) {
+                interrupted = TRUE;
+                break;
+            }
+            Sleep(20);
+        }
+        TEST("one segment is complete before the interruption", interrupted);
+
+        engine_pause(eng, id);
+        hls_test_server_release();
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < 20000u) {
+            if (eng->active_count == 0) {
+                stopped = TRUE;
+                break;
+            }
+            Sleep(20);
+        }
+        TEST("the interrupted download stops and is PAUSED", stopped && dl->state == DL_PAUSED);
+        gets_before = hls_test_server_gets("/restart.bin");
+        first_start = hls_test_server_get_start("/restart.bin", 0);
+        TEST("a request was served before the interruption", gets_before >= 1 && first_start != ~0ULL);
+        TEST("the interrupted queue is saved", queue_persist_save(eng));
+        engine_destroy(eng);
+        eng = NULL;
+        dl = NULL;
+    }
+
+    /* ری‌استارت: فروشگاه بسته و دوباره باز می‌شود، موتور تازه صف را بارگذاری می‌کند */
+    lass_store_close();
+    TEST("store reopens after the restart", lass_store_open("tels_test_restart.tels"));
+    eng2 = engine_create(NULL);
+    TEST("the restarted engine is created", eng2 != NULL);
+    if (eng2) {
+        TEST("the queue is loaded after the restart", queue_persist_load(eng2, NULL));
+        EnterCriticalSection(&eng2->lock);
+        dl = eng2->queue_head;
+        if (dl) id2 = dl->id;
+        LeaveCriticalSection(&eng2->lock);
+        TEST("the interrupted download is restored as PAUSED", dl != NULL && dl->state == DL_PAUSED);
+        hls_test_server_reset_gets("/restart.bin");
+        if (dl) {
+            engine_resume(eng2, id2);
+            t0 = GetTickCount();
+            while (GetTickCount() - t0 < 60000u) {
+                if (dl->state == DL_COMPLETED) {
+                    completed = TRUE;
+                    break;
+                }
+                if (dl->state == DL_FAILED) break;
+                Sleep(50);
+            }
+            TEST("the restarted download completes", completed);
+            gets_after = hls_test_server_gets("/restart.bin");
+            for (k = 0; k < gets_after && k < 8; k++)
+                if (hls_test_server_get_start("/restart.bin", k) == first_start) reused = TRUE;
+            TEST("the finished segment is not requested again after the restart",
+                 !reused && gets_after >= 1);
+        }
+        engine_destroy(eng2);
+    }
+    f = fopen("trs_out.bin", "rb");
+    if (f && got) {
+        n = fread(got, 1, TRS_SIZE, f);
+        same = (n == TRS_SIZE && memcmp(got, body, TRS_SIZE) == 0);
+    }
+    if (f) fclose(f);
+    TEST("the output equals the original bytes", same);
+
+    lass_store_close();
+    DeleteFileA("tels_test_restart.tels");
+    hls_test_server_stop();
+    DeleteFileA("trs_out.bin");
+    free(body);
+    free(got);
+}
