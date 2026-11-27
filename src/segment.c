@@ -58,6 +58,7 @@ retry:
     /* Respect speed limit: checked per-chunk in the read loop */
     uint32_t retry_after = 0;
     DlStream *conn = dl_stream_open_range_info(dl, seg->current, seg->end, &retry_after);
+    if (conn) dl_stream_set_cancel(conn, &seg->cancel_flag);
     if (!conn) {
         /* Back-off and retry */
         EnterCriticalSection(&seg->lock);

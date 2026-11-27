@@ -86,6 +86,7 @@ int main(void) {
     test_engine_cancel_active();
     test_engine_remove_active();
     test_engine_restart_resume();
+    test_engine_midsegment_resume();
     test_media_http();
     test_media_store();
     test_resume_and_zero_byte();

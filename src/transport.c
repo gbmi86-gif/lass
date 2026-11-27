@@ -13,6 +13,7 @@ struct DlStream {
     BOOL       is_ftp;
     HTTP_Conn *http;
     FtpStream *ftp;
+    const volatile bool *cancel; /* پرچم توقف worker بخش */
 };
 
 BOOL dl_url_supported(const char *url) {
@@ -60,10 +61,21 @@ DlStream *dl_stream_open_range(struct IDM_Download *dl, uint64_t start, uint64_t
     return dl_stream_open_range_info(dl, start, end, NULL);
 }
 
+void dl_stream_set_cancel(DlStream *s, const volatile bool *flag) {
+    if (s) s->cancel = flag;
+}
+
 int dl_stream_read(DlStream *s, void *buf, int buf_size) {
+    int idle = 0;
     if (!s) return -1;
-    return s->is_ftp ? ftp_range_read(s->ftp, buf, buf_size)
-                     : http_read(s->http, buf, buf_size);
+    if (s->is_ftp) return ftp_range_read(s->ftp, buf, buf_size);
+    for (;;) {
+        int n = http_read(s->http, buf, buf_size);
+        if (n != -3) return n;
+        /* مهلت کوتاه بدون داده: اگر worker توقف خواسته، همین‌جا خطا بده؛ وگرنه دوباره بخوان.
+           شش مهلت پشت‌سرهم (≈ ۶ ثانیه بی‌داده) همان حد قدیمی است و خطا می‌دهد. */
+        if (!s->cancel || *s->cancel || ++idle >= 6) return -1;
+    }
 }
 
 BOOL dl_stream_got_partial(const DlStream *s) {

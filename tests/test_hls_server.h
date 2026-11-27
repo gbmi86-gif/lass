@@ -30,4 +30,5 @@ int hls_test_server_gets(const char *path);
 unsigned long long hls_test_server_get_start(const char *path, int i);
 void hls_test_server_reset_gets(const char *path);
 void hls_test_server_accept_ranges(const char *path);
+void hls_test_server_cut_first(const char *path, int bytes);
 #endif /* LASS_TEST_HLS_SERVER_H */

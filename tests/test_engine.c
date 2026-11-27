@@ -1501,3 +1501,168 @@ void test_engine_restart_resume(void) {
     free(body);
     free(got);
 }
+
+/* ======================================================
+   تست: قطع وسط یک بخش؛ ادامه از همان بایت ذخیره‌شده، نه از اول بخش
+   ====================================================== */
+#define TMS_PORT  18607
+#define TMS_SIZE  (4u * 1024u * 1024u)
+#define TMS_CUT   (150u * 1024u)
+
+void test_engine_midsegment_resume(void) {
+    IDM_Engine *eng = NULL, *eng2 = NULL;
+    IDM_Download *dl = NULL;
+    uint8_t *body = NULL, *got = NULL;
+    uint32_t i, id = 0, id2 = 0, seg_start = 0, seg_end = 0, saved_cur = 0, nseg = 0;
+    DWORD t0, pause_ms = 0;
+    unsigned long long first_start = ~0ULL;
+    int k, gets_after = 0;
+    BOOL split = FALSE, partial = FALSE, prompt = FALSE, stopped = FALSE, found_seg = FALSE, mid = FALSE;
+    BOOL exact = FALSE, from_start = FALSE, completed = FALSE, same = FALSE;
+    FILE *f;
+    size_t n;
+
+    SECTION("Engine: a transfer cut in the middle of a segment resumes from the saved byte, not from the segment start");
+    body = (uint8_t *)malloc(TMS_SIZE);
+    got = (uint8_t *)malloc(TMS_SIZE);
+    if (!body || !got) {
+        TEST("memory for the mid-segment test", FALSE);
+        free(body);
+        free(got);
+        return;
+    }
+    for (i = 0; i < TMS_SIZE; i++) body[i] = (uint8_t)(i * 29u + 13u);
+    DeleteFileA("tms_out.bin");
+    if (!hls_test_server_start(TMS_PORT)) {
+        TEST("test server starts", FALSE);
+        free(body);
+        free(got);
+        return;
+    }
+    hls_test_server_set("/mid.bin", body, TMS_SIZE);
+    hls_test_server_accept_ranges("/mid.bin");
+    hls_test_server_gate_after("/mid.bin", 1);             /* GET #1 جواب می‌دهد؛ بقیه منتظر می‌مانند */
+    hls_test_server_cut_first("/mid.bin", (int)TMS_CUT);   /* GET #1 فقط TMS_CUT بایت می‌فرستد */
+    hls_test_server_reset_hits();
+    hls_test_server_reset_gets("/mid.bin");
+
+    lass_store_close();
+    DeleteFileA("tels_test_mid.tels");
+    TEST("store opens for the mid-segment test", lass_store_open("tels_test_mid.tels"));
+
+    eng = engine_create(NULL);
+    TEST("engine create", eng != NULL);
+    dl = eng ? engine_add(eng, "http://127.0.0.1:18607/mid.bin", "tms_out.bin", 4, 0) : NULL;
+    TEST("download added", dl != NULL);
+    if (dl) {
+        id = dl->id;
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < 30000u && dl->num_segments == 0) Sleep(20);
+        nseg = dl->num_segments;
+        split = nseg >= 2;
+        TEST("the download is split into several segments", split);
+
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < 30000u) {
+            if (dl->downloaded >= 100LL * 1024LL) {
+                partial = TRUE;
+                break;
+            }
+            Sleep(20);
+        }
+        TEST("the first segment is partly received", partial);
+        first_start = hls_test_server_get_start("/mid.bin", 0);
+
+        t0 = GetTickCount();
+        engine_pause(eng, id);
+        pause_ms = GetTickCount() - t0;
+        prompt = pause_ms < 5000u;
+        TEST("pausing returns promptly while the transfer is stalled", prompt);
+        hls_test_server_release();
+
+        t0 = GetTickCount();
+        while (GetTickCount() - t0 < 20000u) {
+            if (eng->active_count == 0) {
+                stopped = TRUE;
+                break;
+            }
+            Sleep(20);
+        }
+        TEST("the paused transfer stops and is PAUSED", stopped && dl->state == DL_PAUSED);
+
+        /* آنچه روی دیسک ماند: بخشی که وسط راه قطع شد، با بایت ذخیره‌شده‌اش */
+        f = fopen("tms_out.bin.idmstate", "rb");
+        if (f) {
+            IDM_ResumeData hd;
+            if (fread(&hd, sizeof(hd), 1, f) == 1) {
+                for (uint32_t q = 0; q < hd.num_segments; q++) {
+                    IDM_ResumeSeg rs;
+                    if (fread(&rs, sizeof(rs), 1, f) != 1) break;
+                    if ((unsigned long long)rs.start == first_start) {
+                        found_seg = TRUE;
+                        seg_start = (uint32_t)rs.start;
+                        seg_end = (uint32_t)rs.end;
+                        saved_cur = (uint32_t)rs.current;
+                    }
+                }
+            }
+            fclose(f);
+        }
+        mid = found_seg && saved_cur > seg_start && saved_cur <= seg_end;
+        TEST("the partly received segment is saved mid-way", mid);
+        TEST("the interrupted queue is saved", queue_persist_save(eng));
+        engine_destroy(eng);
+        eng = NULL;
+        dl = NULL;
+    }
+
+    /* ری‌استارت */
+    lass_store_close();
+    TEST("store reopens after the restart", lass_store_open("tels_test_mid.tels"));
+    eng2 = engine_create(NULL);
+    TEST("the restarted engine is created", eng2 != NULL);
+    if (eng2) {
+        TEST("the queue is loaded after the restart", queue_persist_load(eng2, NULL));
+        EnterCriticalSection(&eng2->lock);
+        dl = eng2->queue_head;
+        if (dl) id2 = dl->id;
+        LeaveCriticalSection(&eng2->lock);
+        hls_test_server_reset_gets("/mid.bin");
+        if (dl) {
+            engine_resume(eng2, id2);
+            t0 = GetTickCount();
+            while (GetTickCount() - t0 < 60000u) {
+                if (dl->state == DL_COMPLETED) {
+                    completed = TRUE;
+                    break;
+                }
+                if (dl->state == DL_FAILED) break;
+                Sleep(50);
+            }
+            TEST("the restarted download completes", completed);
+            gets_after = hls_test_server_gets("/mid.bin");
+            for (k = 0; k < gets_after && k < 8; k++) {
+                unsigned long long st = hls_test_server_get_start("/mid.bin", k);
+                if (found_seg && st == (unsigned long long)saved_cur) exact = TRUE;
+                if (st == first_start) from_start = TRUE;
+            }
+            TEST("the transfer resumes at the saved byte", found_seg && exact);
+            TEST("the segment is not restarted from its beginning", !from_start);
+        }
+        engine_destroy(eng2);
+    }
+    f = fopen("tms_out.bin", "rb");
+    if (f && got) {
+        n = fread(got, 1, TMS_SIZE, f);
+        same = (n == TMS_SIZE && memcmp(got, body, TMS_SIZE) == 0);
+    }
+    if (f) fclose(f);
+    TEST("the output equals the original bytes", same);
+
+    lass_store_close();
+    DeleteFileA("tels_test_mid.tels");
+    hls_test_server_stop();
+    DeleteFileA("tms_out.bin");
+    free(body);
+    free(got);
+}

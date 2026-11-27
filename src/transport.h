@@ -25,6 +25,7 @@ DlStream  *dl_stream_open_range_info(struct IDM_Download *dl, uint64_t start, ui
                                              uint32_t *retry_after_out);
 /* >0 بایت، 0 پایان، <0 خطا */
 int        dl_stream_read(DlStream *s, void *buf, int buf_size);
+void       dl_stream_set_cancel(DlStream *s, const volatile bool *flag);
 BOOL       dl_stream_got_partial(const DlStream *s);
 void       dl_stream_close(DlStream *s);
 

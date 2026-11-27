@@ -201,4 +201,5 @@ void test_queue_round_trip(void);
 void test_engine_cancel_active(void);
 void test_engine_remove_active(void);
 void test_engine_restart_resume(void);
+void test_engine_midsegment_resume(void);
 #endif /* LASS_TEST_COMMON_H */

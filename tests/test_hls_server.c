@@ -26,6 +26,7 @@ typedef struct {
     int            gate_after;       /* این تعداد GET اول جواب داده می‌شود */
     unsigned long long get_start[8]; /* شروع بازهٔ GET های اول */
     BOOL           ranges;           /* TRUE: Accept-Ranges: bytes در پاسخ‌های 200 */
+    int            cut;              /* بایت‌هایی که GET اول می‌فرستد و بعد منتظر دروازه می‌ماند */
     int            hits;
 } HlsTsRoute;
 
@@ -182,6 +183,7 @@ static void handle_conn(SOCKET cs) {
     BOOL partial = FALSE;
     BOOL hold = FALSE;
     BOOL ranges_hdr = FALSE;
+    uint32_t cut_now = 0;
 
     EnterCriticalSection(&g_lock);
     HlsTsRoute *r = route_find(path, FALSE);
@@ -238,8 +240,24 @@ static void handle_conn(SOCKET cs) {
     hl += snprintf(head + hl, sizeof(head) - (size_t)hl,
                    "Content-Length: %u\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
                    (unsigned int)blen);
+    /* اولین GET بخشی از بدنه را می‌فرستد و بعد منتظر دروازه می‌ماند (قطع وسط بخش) */
+    EnterCriticalSection(&g_lock);
+    {
+        HlsTsRoute *cr = route_find(path, FALSE);
+        if (cr && cr->cut > 0 && cr->gets == 1 && blen > (uint32_t)cr->cut) {
+            cut_now = (uint32_t)cr->cut;
+            cr->cut = 0;
+        }
+    }
+    LeaveCriticalSection(&g_lock);
     send_all(cs, head, (size_t)hl);
-    if (!is_head) send_all(cs, body, blen);
+    if (!is_head && cut_now > 0) {
+        send_all(cs, body, cut_now);
+        if (g_gate) WaitForSingleObject(g_gate, 20000);
+        send_all(cs, body + cut_now, blen - cut_now);
+    } else if (!is_head) {
+        send_all(cs, body, blen);
+    }
     closesocket(cs);
 }
 
@@ -377,5 +395,12 @@ void hls_test_server_accept_ranges(const char *path) {
     EnterCriticalSection(&g_lock);
     HlsTsRoute *r = route_find(path, TRUE);
     if (r) r->ranges = TRUE;
+    LeaveCriticalSection(&g_lock);
+}
+
+void hls_test_server_cut_first(const char *path, int bytes) {
+    EnterCriticalSection(&g_lock);
+    HlsTsRoute *r = route_find(path, TRUE);
+    if (r) r->cut = bytes;
     LeaveCriticalSection(&g_lock);
 }

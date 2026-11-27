@@ -4,7 +4,7 @@
 
 #include "types.h"
 
-#define SEG_BUF_SIZE  (256 * 1024)   /* 256 KB read buffer per segment */
+#define SEG_BUF_SIZE  (64 * 1024)    /* 64 KB read buffer per segment: progress and resume points advance every 64 KB */
 #define SEG_MAX_RETRY  5
 
 /* ---- Segment structure ---- */

@@ -466,10 +466,15 @@ cleanup:
 /* ======================================================
    Open a ranged HTTP connection for a segment
    ====================================================== */
-HTTP_Conn *http_open_range_status(const char *url, const char *referer,
-                               struct IDM_Download *dl,
-                               uint64_t start, uint64_t end,
-                               uint32_t *retry_after_out, int *status_out) {
+static HTTP_Conn *open_range_with_timeout(DWORD to_receive_ms, const char *url, const char *referer,
+                                 struct IDM_Download *dl,
+                                 uint64_t start, uint64_t end,
+                                 uint32_t *retry_after_out, int *status_out);
+
+static HTTP_Conn *open_range_with_timeout(DWORD to_receive_ms, const char *url, const char *referer,
+                                 struct IDM_Download *dl,
+                                 uint64_t start, uint64_t end,
+                                 uint32_t *retry_after_out, int *status_out) {
     if (status_out) *status_out = 0;
     if (!url) return NULL;
 
@@ -501,7 +506,7 @@ HTTP_Conn *http_open_range_status(const char *url, const char *referer,
        جانبی این کار، یه reconnect گاه‌به‌گاه روی شبکه‌ی واقعاً کند
        (نه stall شده) هست که منطق retry موجود (SEG_MAX_RETRY با
        backoff) به‌هرحال پوششش می‌ده. */
-    DWORD to_connect = 8000, to_receive = 6000;
+    DWORD to_connect = 8000, to_receive = to_receive_ms;
     InternetSetOptionA(conn->hConnect, INTERNET_OPTION_CONNECT_TIMEOUT,
                        &to_connect, sizeof(to_connect));
     InternetSetOptionA(conn->hConnect, INTERNET_OPTION_RECEIVE_TIMEOUT,
@@ -598,11 +603,20 @@ HTTP_Conn *http_open_range_status(const char *url, const char *referer,
     return conn;
 }
 
+/* مسیر HLS و DASH: مهلت دریافت ۶ ثانیه، همان قبلی */
+HTTP_Conn *http_open_range_status(const char *url, const char *referer,
+                                 struct IDM_Download *dl,
+                                 uint64_t start, uint64_t end,
+                                 uint32_t *retry_after_out, int *status_out) {
+    return open_range_with_timeout(6000, url, referer, dl, start, end, retry_after_out, status_out);
+}
+
 HTTP_Conn *http_open_range_ex(const char *url, const char *referer,
                                struct IDM_Download *dl,
                                uint64_t start, uint64_t end,
                                uint32_t *retry_after_out) {
-    return http_open_range_status(url, referer, dl, start, end, retry_after_out, NULL);
+    /* بخش‌ها: مهلت دریافت ۱ ثانیه تا توقف سریع دیده شود؛ خطای واقعی بعد از ۶ مهلت پشت‌سرهم */
+    return open_range_with_timeout(1000, url, referer, dl, start, end, retry_after_out, NULL);
 }
 
 /* حفظ سازگاری: همان رفتار قبلی، بدون گرفتن Retry-After */
@@ -624,6 +638,8 @@ int http_read(HTTP_Conn *conn, void *buf, int buf_size) {
 
     DWORD bytes_read = 0;
     if (!InternetReadFile(conn->hRequest, buf, (DWORD)buf_size, &bytes_read)) {
+        /* مهلت دریافت: هنوز داده نیامده؛ اتصال بسته نمی‌شود و صدا زننده می‌تواند دوباره بخواند */
+        if (GetLastError() == ERROR_INTERNET_TIMEOUT) return -3;
         conn->open = false;
         return -1;
     }
@@ -884,3 +900,4 @@ void http_fixup_extension(char *filename, int filename_sz,
     }
     strncat(filename, ext, (size_t)(filename_sz - cur_len - 1));
 }
+
